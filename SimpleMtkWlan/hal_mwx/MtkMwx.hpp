@@ -36,6 +36,7 @@ struct smtw_tune_t {
 	int bw;		/* max channel width to advertise: 20, 40 or 80 MHz */
 	int txba;	/* request TX Block Ack (A-MPDU TX) */
 	int sndq;	/* if_snd length in packets (applies immediately) */
+	int txs;	/* TX status report every N frames, 0 = none (immediate) */
 };
 extern struct smtw_tune_t smtw_tune;
 struct ieee80211com;

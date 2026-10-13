@@ -1030,6 +1030,39 @@ static uint32_t smtw_rxrate_sgi;
 static uint32_t smtw_rx_ofdm[8];	/* by OFDM rate code 0x8..0xf */
 static uint32_t smtw_rx_htmcs[16];
 static uint32_t smtw_rx_vhtmcs[10];	/* any NSS */
+
+/*
+ * TX status (TXS) diagnostics: rate the firmware actually used, bandwidth,
+ * whether the frame went out in an A-MPDU and ACK errors. TXS word 0 as
+ * MT_TXS0_* and the rate as MT_TX_RATE_* in Linux mt76 connac2.
+ */
+static uint32_t smtw_txs_n, smtw_txs_mode[16], smtw_txs_vhtmcs[10];
+static uint32_t smtw_txs_htmcs[16], smtw_txs_nss[4], smtw_txs_bw[4];
+static uint32_t smtw_txs_ampdu, smtw_txs_ackerr, smtw_txs_fixed;
+
+static void
+smtw_txs_account(uint32_t txs0)
+{
+	uint32_t rate = txs0 & 0x3fff;
+	uint32_t mode = (rate & MT_TX_RATE_MODE_MASK) >> MT_TX_RATE_MODE_SHIFT;
+	uint32_t idx = rate & MT_TX_RATE_IDX_MASK;
+	uint32_t nss = (rate & MT_TX_RATE_NSS_MASK) >> MT_TX_RATE_NSS_SHIFT;
+
+	smtw_txs_n++;
+	smtw_txs_mode[mode & 0xf]++;
+	if (mode == 4 && (idx & 0xf) < 10)
+		smtw_txs_vhtmcs[idx & 0xf]++;
+	else if ((mode == 2 || mode == 3) && idx < 16)
+		smtw_txs_htmcs[idx]++;
+	smtw_txs_nss[nss & 3]++;
+	smtw_txs_bw[(txs0 >> 29) & 3]++;
+	if (txs0 & (1U << 25))
+		smtw_txs_ampdu++;
+	if (txs0 & (7U << 16))
+		smtw_txs_ackerr++;
+	if (txs0 & (1U << 31))
+		smtw_txs_fixed++;
+}
 static uint32_t smtw_addba_req, smtw_addba_ok, smtw_addba_fail;
 static uint32_t smtw_txba_req, smtw_txba_ok, smtw_txba_fail;
 static uint8_t smtw_rxrate_maxidx[16];
@@ -1066,7 +1099,7 @@ static uint32_t smtw_tx_stall, smtw_tx_resume, smtw_tx_drop;
 /* net80211 (ieee80211.c), not exported in a header. */
 void	ieee80211_configure_ampdu_tx(struct ieee80211com *, int);
 
-struct smtw_tune_t smtw_tune = { 1, 1, 1, 80, 0, 2048 };
+struct smtw_tune_t smtw_tune = { 1, 1, 1, 80, 0, 2048, 1 };
 
 
 static inline int	mwx_dma_free_slots(struct mwx_queue *);
@@ -1185,6 +1218,37 @@ mwx_watchdog(struct ifnet *ifp)
 	    (wd_ticks % 2) == 0) {
 		static uint32_t last_stall, last_resume, last_drop, last_rxfail,
 		    last_addba;
+
+		if (smtw_txs_n > 0) {
+			MWX_DEV_LOG(sc, "txs n=%u cck=%u ofdm=%u ht=%u vht=%u "
+			    "vht mcs0-9 %u %u %u %u %u %u %u %u %u %u | ht mcs "
+			    "0-7 %u %u %u %u %u %u %u %u 8-15 %u %u %u %u %u %u "
+			    "%u %u | nss1=%u nss2=%u bw20=%u bw40=%u bw80=%u "
+			    "ampdu=%u ackerr=%u fixed=%u\n", smtw_txs_n,
+			    smtw_txs_mode[0], smtw_txs_mode[1],
+			    smtw_txs_mode[2] + smtw_txs_mode[3], smtw_txs_mode[4],
+			    smtw_txs_vhtmcs[0], smtw_txs_vhtmcs[1],
+			    smtw_txs_vhtmcs[2], smtw_txs_vhtmcs[3],
+			    smtw_txs_vhtmcs[4], smtw_txs_vhtmcs[5],
+			    smtw_txs_vhtmcs[6], smtw_txs_vhtmcs[7],
+			    smtw_txs_vhtmcs[8], smtw_txs_vhtmcs[9],
+			    smtw_txs_htmcs[0], smtw_txs_htmcs[1], smtw_txs_htmcs[2],
+			    smtw_txs_htmcs[3], smtw_txs_htmcs[4], smtw_txs_htmcs[5],
+			    smtw_txs_htmcs[6], smtw_txs_htmcs[7], smtw_txs_htmcs[8],
+			    smtw_txs_htmcs[9], smtw_txs_htmcs[10],
+			    smtw_txs_htmcs[11], smtw_txs_htmcs[12],
+			    smtw_txs_htmcs[13], smtw_txs_htmcs[14],
+			    smtw_txs_htmcs[15], smtw_txs_nss[0], smtw_txs_nss[1],
+			    smtw_txs_bw[0], smtw_txs_bw[1], smtw_txs_bw[2],
+			    smtw_txs_ampdu, smtw_txs_ackerr, smtw_txs_fixed);
+			smtw_txs_n = smtw_txs_ampdu = smtw_txs_ackerr = 0;
+			smtw_txs_fixed = 0;
+			memset(smtw_txs_mode, 0, sizeof(smtw_txs_mode));
+			memset(smtw_txs_vhtmcs, 0, sizeof(smtw_txs_vhtmcs));
+			memset(smtw_txs_htmcs, 0, sizeof(smtw_txs_htmcs));
+			memset(smtw_txs_nss, 0, sizeof(smtw_txs_nss));
+			memset(smtw_txs_bw, 0, sizeof(smtw_txs_bw));
+		}
 
 		if (smtw_tx_stall != last_stall ||
 		    smtw_tx_resume != last_resume ||
@@ -3443,13 +3507,15 @@ mwx_dma_rx_process(struct mwx_softc *sc, struct mbuf_list *ml)
 			notify_count++;
 			mwx_mac_tx_free(sc, m);
 			break;
-		case PKT_TYPE_TXS:
-#if TODO
-			for (rxd += 2; rxd + 8 <= end; rxd += 8)
-				mt7921_mac_add_txs(dev, rxd);
-#endif
+		case PKT_TYPE_TXS: {
+			/* As mt7921_mac_add_txs(): 8 words per report after 2. */
+			size_t nw = mbuf_len(m) / sizeof(uint32_t), w;
+
+			for (w = 2; w + 8 <= nw; w += 8)
+				smtw_txs_account(le32toh(data[w]));
 			m_freem(m);
 			break;
+		}
 		case PKT_TYPE_NORMAL_MCU:
 			normal_mcu_count++;
 			mwx_rx(sc, m, &mlout);
@@ -6468,8 +6534,15 @@ mt7921_mac_write_txwi(struct mwx_softc *sc, struct mbuf *m,
 	uint32_t val, p_fmt, omac_idx;
 	uint8_t q_idx, wmm_idx, band_idx;
 	uint8_t phy_idx = 0;
-	/* XXX hardcoded and wrong */
-	int pid = MT_PACKET_ID_FIRST;
+	/*
+	 * Ask for a TX status report only every smtw_tune.txs frames
+	 * (Linux samples too); MT_PACKET_ID_NO_SKB means no report.
+	 */
+	static uint32_t txs_seq;
+	int pid = MT_PACKET_ID_NO_SKB;
+
+	if (smtw_tune.txs > 0 && (++txs_seq % (uint32_t)smtw_tune.txs) == 0)
+		pid = MT_PACKET_ID_FIRST;
 	enum mt76_txq_id qid = MT_TXQ_BE;
 
 	wh = mtod(m, struct ieee80211_frame *);

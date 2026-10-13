@@ -389,7 +389,7 @@ bool SimpleMtkWlan::start(IOService *provider)
 // back as the "SMTWTune" property.
 void SimpleMtkWlan::publishTune()
 {
-    OSDictionary *d = OSDictionary::withCapacity(6);
+    OSDictionary *d = OSDictionary::withCapacity(7);
     if (!d)
         return;
     OSNumber *ht = OSNumber::withNumber(smtw_tune.ht, 32);
@@ -398,12 +398,14 @@ void SimpleMtkWlan::publishTune()
     OSNumber *bw = OSNumber::withNumber(smtw_tune.bw, 32);
     OSNumber *txba = OSNumber::withNumber(smtw_tune.txba, 32);
     OSNumber *sndq = OSNumber::withNumber(smtw_tune.sndq, 32);
+    OSNumber *txs = OSNumber::withNumber(smtw_tune.txs, 32);
     if (ht) { d->setObject("ht", ht); ht->release(); }
     if (ba) { d->setObject("ba", ba); ba->release(); }
     if (vht) { d->setObject("vht", vht); vht->release(); }
     if (bw) { d->setObject("bw", bw); bw->release(); }
     if (txba) { d->setObject("txba", txba); txba->release(); }
     if (sndq) { d->setObject("sndq", sndq); sndq->release(); }
+    if (txs) { d->setObject("txs", txs); txs->release(); }
     setProperty("SMTWTune", d);
     d->release();
 }
@@ -436,6 +438,11 @@ IOReturn SimpleMtkWlan::setProperties(OSObject *properties)
         struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
         if (ifp->if_snd.queue != NULL)
             ifq_set_maxlen(&ifp->if_snd, smtw_tune.sndq);
+    }
+    // TX status report sampling: every N frames, 0 = none.
+    if ((n = OSDynamicCast(OSNumber, tune->getObject("txs")))) {
+        UInt32 v = n->unsigned32BitValue();
+        smtw_tune.txs = v > 1024 ? 1024 : (int)v;
     }
     XYLog("tune ht=%d ba=%d vht=%d bw=%d txba=%d sndq=%d\n", smtw_tune.ht,
         smtw_tune.ba, smtw_tune.vht, smtw_tune.bw, smtw_tune.txba,
