@@ -34,6 +34,8 @@ struct smtw_tune_t {
 	int ba;		/* accept RX Block Ack agreements (A-MPDU RX) */
 };
 extern struct smtw_tune_t smtw_tune;
+struct ieee80211com;
+void smtw_request_reassoc(struct ieee80211com *);
 
 class MtkMwx : public MtkHalService, MtkDriverInfo, MtkDriverController {
     OSDeclareDefaultStructors(MtkMwx)

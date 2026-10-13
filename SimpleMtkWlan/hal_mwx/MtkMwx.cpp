@@ -402,6 +402,7 @@ struct mwx_softc {
 	struct task		sc_scan_task;
 	struct task		sc_reset_task;
 	struct task		sc_ba_task;
+	struct task		sc_reassoc_task;
 	uint8_t			sc_ba_start;	/* TIDs to enable, bitmask */
 	uint8_t			sc_ba_stop;	/* TIDs to disable, bitmask */
 	CTimeout		*sc_reset_to;
@@ -598,6 +599,7 @@ int	mwx_ampdu_rx_start(struct ieee80211com *, struct ieee80211_node *,
 void	mwx_ampdu_rx_stop(struct ieee80211com *, struct ieee80211_node *,
 	    uint8_t);
 void	mwx_ba_task(void *);
+void	mwx_reassoc_task(void *);
 int	mt7921_mcu_sta_ba(struct mwx_softc *, struct ieee80211_node *,
 	    uint8_t, int);
 int	mwx_set_key(struct ieee80211com *, struct ieee80211_node *,
@@ -973,6 +975,7 @@ mwx_stop(struct ifnet *ifp)
 		task_del(sc->sc_nswq, &sc->sc_setkey_task);
 		task_del(sc->sc_nswq, &sc->sc_reset_task);
 		task_del(sc->sc_nswq, &sc->sc_ba_task);
+		task_del(sc->sc_nswq, &sc->sc_reassoc_task);
 	}
 	sc->sc_ba_start = sc->sc_ba_stop = 0;
 	task_del(systq, &sc->sc_scan_task);
@@ -1418,6 +1421,33 @@ mwx_ba_task(void *arg)
 		}
 	}
 	splx(s);
+}
+
+/*
+ * Rejoin the current network with the same SSID and key, so changed
+ * tunables take effect without asking for the password again. RUN ->
+ * SCAN is handled by net80211 like a beacon miss.
+ */
+void
+mwx_reassoc_task(void *arg)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)arg;
+	struct ieee80211com *ic = &sc->sc_ic;
+	int s = splnet();
+
+	MWX_DEV_LOG(sc, "reassoc requested state=%d\n", ic->ic_state);
+	if (ic->ic_state == IEEE80211_S_RUN)
+		ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
+	splx(s);
+}
+
+void
+smtw_request_reassoc(struct ieee80211com *ic)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
+
+	if (sc != NULL && sc->sc_nswq != NULL)
+		task_add(sc->sc_nswq, &sc->sc_reassoc_task);
 }
 
 int
@@ -2445,6 +2475,7 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	task_set(&sc->sc_reset_task, mwx_reset_task, sc, "mwx_reset");
 	task_set(&sc->sc_scan_task, mwx_end_scan_task, sc, "mwx_scan");
 	task_set(&sc->sc_ba_task, mwx_ba_task, sc, "mwx_ba");
+	task_set(&sc->sc_reassoc_task, mwx_reassoc_task, sc, "mwx_reassoc");
 	timeout_set(&sc->sc_reset_to, mwx_reset_timeo, sc);
 
 	/*

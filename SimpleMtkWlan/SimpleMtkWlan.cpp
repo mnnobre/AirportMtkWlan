@@ -385,7 +385,7 @@ bool SimpleMtkWlan::start(IOService *provider)
 
 // Runtime tunables (smtw_tune in MtkMwx.cpp), e.g. from user space:
 //   IORegistryEntrySetCFProperty(service, "SMTWTune", {"ht": 1, "ba": 1})
-// They apply from the next association. The current values are published
+// They apply from the next association; {"reassoc": 1} rejoins right away. The current values are published
 // back as the "SMTWTune" property.
 void SimpleMtkWlan::publishTune()
 {
@@ -415,6 +415,10 @@ IOReturn SimpleMtkWlan::setProperties(OSObject *properties)
         smtw_tune.ba = n->unsigned32BitValue() ? 1 : 0;
     XYLog("tune ht=%d ba=%d\n", smtw_tune.ht, smtw_tune.ba);
     publishTune();
+    // "reassoc": rejoin now with the same SSID and key to apply the change.
+    if ((n = OSDynamicCast(OSNumber, tune->getObject("reassoc"))) &&
+        n->unsigned32BitValue())
+        smtw_request_reassoc(fHalService->get80211Controller());
     return kIOReturnSuccess;
 }
 
