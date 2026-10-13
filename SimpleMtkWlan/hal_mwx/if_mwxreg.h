@@ -1327,6 +1327,21 @@ struct sta_rec_ra_info {
 #define	RA_LEGACY_OFDM	0x3fc0
 #define	RA_LEGACY_CCK	0x000f
 
+/* Block Ack agreement, as mt76_connac_mcu_sta_ba_tlv() in Linux. */
+#define	STA_REC_BA			0x06
+#define	MT_BA_TYPE_ORIGINATOR		1
+#define	MT_BA_TYPE_RECIPIENT		2
+struct sta_rec_ba {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		tid;
+	uint8_t		ba_type;
+	uint8_t		amsdu;
+	uint8_t		ba_en;
+	uint16_t	ssn;
+	uint16_t	winsize;
+} __packed;
+
 #define	STA_REC_HT			0x09
 struct sta_rec_ht {
 	uint16_t	tag;

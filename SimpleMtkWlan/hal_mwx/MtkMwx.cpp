@@ -401,6 +401,9 @@ struct mwx_softc {
 	struct task		sc_setkey_task;
 	struct task		sc_scan_task;
 	struct task		sc_reset_task;
+	struct task		sc_ba_task;
+	uint8_t			sc_ba_start;	/* TIDs to enable, bitmask */
+	uint8_t			sc_ba_stop;	/* TIDs to disable, bitmask */
 	CTimeout		*sc_reset_to;
 	u_int			sc_flags;
 #define MWX_FLAG_SCANNING		0x01
@@ -592,6 +595,11 @@ void	mwx_bgscan_done(struct ieee80211com *,
 void	mwx_bgscan_done_task(void *);
 int	mwx_ampdu_rx_start(struct ieee80211com *, struct ieee80211_node *,
 	    uint8_t);
+void	mwx_ampdu_rx_stop(struct ieee80211com *, struct ieee80211_node *,
+	    uint8_t);
+void	mwx_ba_task(void *);
+int	mt7921_mcu_sta_ba(struct mwx_softc *, struct ieee80211_node *,
+	    uint8_t, int);
 int	mwx_set_key(struct ieee80211com *, struct ieee80211_node *,
 	    struct ieee80211_key *);
 void	mwx_delete_key(struct ieee80211com *, struct ieee80211_node *,
@@ -964,7 +972,9 @@ mwx_stop(struct ifnet *ifp)
 		task_del(sc->sc_nswq, &sc->sc_bgscan_done_task);
 		task_del(sc->sc_nswq, &sc->sc_setkey_task);
 		task_del(sc->sc_nswq, &sc->sc_reset_task);
+		task_del(sc->sc_nswq, &sc->sc_ba_task);
 	}
+	sc->sc_ba_start = sc->sc_ba_stop = 0;
 	task_del(systq, &sc->sc_scan_task);
 	timeout_del(&sc->sc_reset_to);
 
@@ -1004,6 +1014,10 @@ mwx_stop(struct ifnet *ifp)
 static uint32_t smtw_rxrate_mode[16];
 static uint32_t smtw_rxrate_bw[4];
 static uint32_t smtw_rxrate_sgi;
+/* RX diagnostics: rate histogram and Block Ack activity. */
+static uint32_t smtw_rx_ofdm[8];	/* by OFDM rate code 0x8..0xf */
+static uint32_t smtw_rx_htmcs[16];
+static uint32_t smtw_addba_req, smtw_addba_ok, smtw_addba_fail;
 static uint8_t smtw_rxrate_maxidx[16];
 
 static void
@@ -1014,6 +1028,10 @@ smtw_rxrate_account(uint32_t v0)
 	uint32_t bw = (v0 >> 12) & 0x7;
 
 	smtw_rxrate_mode[mode]++;
+	if (mode == 1 && idx >= 8 && idx <= 0xf)
+		smtw_rx_ofdm[idx - 8]++;
+	else if ((mode == 2 || mode == 3) && idx < 16)
+		smtw_rx_htmcs[idx]++;
 	if (idx > smtw_rxrate_maxidx[mode])
 		smtw_rxrate_maxidx[mode] = idx;
 	smtw_rxrate_bw[bw & 3]++;
@@ -1028,6 +1046,9 @@ smtw_rxrate_account(uint32_t v0)
  * if_snd, and the TX-free event restarts output.
  */
 static uint32_t smtw_tx_stall, smtw_tx_resume, smtw_tx_drop;
+
+struct smtw_tune_t smtw_tune = { 1, 0 };
+
 
 static inline int	mwx_dma_free_slots(struct mwx_queue *);
 
@@ -1119,23 +1140,48 @@ mwx_watchdog(struct ifnet *ifp)
 			    sizeof(smtw_rxrate_maxidx));
 			memset(smtw_rxrate_bw, 0, sizeof(smtw_rxrate_bw));
 			smtw_rxrate_sgi = 0;
+			/* OFDM codes 0x8..0xf listed by speed: 6 9 12 18 24 36 48 54. */
+			MWX_DEV_LOG(sc, "rxhist ofdm %u %u %u %u %u %u %u %u | "
+			    "ht mcs0-7 %u %u %u %u %u %u %u %u mcs8-15 %u %u %u "
+			    "%u %u %u %u %u\n",
+			    smtw_rx_ofdm[3], smtw_rx_ofdm[7], smtw_rx_ofdm[2],
+			    smtw_rx_ofdm[6], smtw_rx_ofdm[1], smtw_rx_ofdm[5],
+			    smtw_rx_ofdm[0], smtw_rx_ofdm[4],
+			    smtw_rx_htmcs[0], smtw_rx_htmcs[1], smtw_rx_htmcs[2],
+			    smtw_rx_htmcs[3], smtw_rx_htmcs[4], smtw_rx_htmcs[5],
+			    smtw_rx_htmcs[6], smtw_rx_htmcs[7], smtw_rx_htmcs[8],
+			    smtw_rx_htmcs[9], smtw_rx_htmcs[10], smtw_rx_htmcs[11],
+			    smtw_rx_htmcs[12], smtw_rx_htmcs[13], smtw_rx_htmcs[14],
+			    smtw_rx_htmcs[15]);
+			memset(smtw_rx_ofdm, 0, sizeof(smtw_rx_ofdm));
+			memset(smtw_rx_htmcs, 0, sizeof(smtw_rx_htmcs));
 		}
 	}
 	if (sc != NULL && sc->sc_ic.ic_state == IEEE80211_S_RUN &&
 	    (wd_ticks % 2) == 0) {
-		static uint32_t last_stall, last_resume, last_drop;
+		static uint32_t last_stall, last_resume, last_drop, last_rxfail,
+		    last_addba;
 
 		if (smtw_tx_stall != last_stall ||
 		    smtw_tx_resume != last_resume ||
-		    smtw_tx_drop != last_drop) {
+		    smtw_tx_drop != last_drop ||
+		    sc->sc_rx_fill_fail != last_rxfail ||
+		    smtw_addba_req != last_addba) {
 			MWX_DEV_LOG(sc, "txflow stall=%u resume=%u drop=%u "
-			    "snd=%u oactive=%u ring_free=%d\n", smtw_tx_stall,
-			    smtw_tx_resume, smtw_tx_drop, ifq_len(&ifp->if_snd),
+			    "snd=%u oactive=%u ring_free=%d rxfail=%u "
+			    "addba req=%u ok=%u fail=%u tune ht=%d ba=%d\n",
+			    smtw_tx_stall, smtw_tx_resume, smtw_tx_drop,
+			    ifq_len(&ifp->if_snd),
 			    ifq_is_oactive(&ifp->if_snd),
-			    mwx_dma_free_slots(&sc->sc_txq));
+			    mwx_dma_free_slots(&sc->sc_txq),
+			    sc->sc_rx_fill_fail, smtw_addba_req,
+			    smtw_addba_ok, smtw_addba_fail, smtw_tune.ht,
+			    smtw_tune.ba);
 			last_stall = smtw_tx_stall;
 			last_resume = smtw_tx_resume;
 			last_drop = smtw_tx_drop;
+			last_rxfail = sc->sc_rx_fill_fail;
+			last_addba = smtw_addba_req;
 		}
 	}
 }
@@ -1295,21 +1341,115 @@ mwx_node_alloc(struct ieee80211com *ic)
 }
 
 /*
- * The AP asks for an RX Block Ack agreement once HT is on. The firmware
- * only sends BlockAcks after a STA_REC_BA update, which is not
- * implemented yet, so refuse: the AP then sends single MPDUs.
+ * RX Block Ack (A-MPDU receive). net80211 keeps the reorder buffer; the
+ * firmware has to know the agreement (STA_REC_BA, recipient) to answer
+ * with BlockAcks, as mt7921_mcu_uni_rx_ba() does in Linux. The MCU
+ * command waits for a response, so it runs in mwx_ba_task(), which then
+ * accepts or refuses the agreement (EBUSY here). Off unless the "ba"
+ * tunable is set; refused requests make the AP send single MPDUs.
  */
+int
+mt7921_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni,
+    uint8_t tid, int enable)
+{
+	struct mwx_node *mw = (struct mwx_node *)ni;
+	struct mwx_vif *mvif = &sc->sc_vif;
+	struct ieee80211_rx_ba *ba = &ni->ni_rx_ba[tid];
+	struct sta_rec_ba *rba;
+	struct mbuf *m;
+	uint16_t tlvnum = 0;
+	uint32_t status = 0;
+	int seq, rv;
+
+	m = mwx_alloc_sta_req_tlv(sizeof(struct sta_req_hdr));
+	if (m == NULL)
+		return ENOBUFS;
+	rba = (struct sta_rec_ba *)mwx_append_tlv(m, &tlvnum, STA_REC_BA,
+	    sizeof(*rba));
+	rba->tid = tid;
+	rba->ba_type = MT_BA_TYPE_RECIPIENT;
+	rba->amsdu = 0;
+	rba->ba_en = enable << tid;
+	rba->ssn = htole16(ba->ba_winstart);
+	rba->winsize = htole16(ba->ba_winsize);
+
+	m = mwx_fill_sta_req_hdr(m, mvif, mvif->omac_idx, mw->wcid, tlvnum);
+	if (m == NULL)
+		return ENOBUFS;
+
+	rv = mwx_mcu_send_mbuf(sc, MCU_UNI_CMD_STA_REC_UPDATE, m, &seq);
+	if (rv == 0)
+		rv = mwx_mcu_wait_resp_int(sc, MCU_UNI_CMD_STA_REC_UPDATE, seq,
+		    &status);
+	MWX_DEV_LOG(sc, "rx ba tid=%u enable=%d ssn=%u win=%u transport=%d "
+	    "firmware=%u\n", tid, enable, ba->ba_winstart, ba->ba_winsize, rv,
+	    status);
+	return rv ? rv : (status ? EIO : 0);
+}
+
+void
+mwx_ba_task(void *arg)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)arg;
+	struct ieee80211com *ic = &sc->sc_ic;
+	struct ieee80211_node *ni = ic->ic_bss;
+	int s = splnet();
+	uint8_t tid;
+
+	for (tid = 0; tid < 8; tid++) {
+		uint8_t bit = 1U << tid;
+
+		if (sc->sc_ba_stop & bit) {
+			sc->sc_ba_stop &= ~bit;
+			if (ic->ic_state == IEEE80211_S_RUN)
+				mt7921_mcu_sta_ba(sc, ni, tid, 0);
+		}
+		if (sc->sc_ba_start & bit) {
+			sc->sc_ba_start &= ~bit;
+			if (ic->ic_state != IEEE80211_S_RUN)
+				continue;
+			if (mt7921_mcu_sta_ba(sc, ni, tid, 1) == 0) {
+				ieee80211_addba_req_accept(ic, ni, tid);
+				smtw_addba_ok++;
+			} else {
+				ieee80211_addba_req_refuse(ic, ni, tid);
+				smtw_addba_fail++;
+			}
+		}
+	}
+	splx(s);
+}
+
 int
 mwx_ampdu_rx_start(struct ieee80211com *ic, struct ieee80211_node *ni,
     uint8_t tid)
 {
 	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
-	static uint32_t refused;
 
-	if (refused++ < 8)
-		MWX_DEV_LOG(sc, "addba request tid=%u refused (#%u)\n", tid,
-		    refused);
-	return ENOTSUP;
+	smtw_addba_req++;
+	if (!smtw_tune.ba || ni != ic->ic_bss || tid >= 8) {
+		if (smtw_addba_req <= 8)
+			MWX_DEV_LOG(sc, "addba request tid=%u refused "
+			    "(ba=%d)\n", tid, smtw_tune.ba);
+		return ENOTSUP;
+	}
+	sc->sc_ba_stop &= ~(1U << tid);
+	sc->sc_ba_start |= 1U << tid;
+	task_add(sc->sc_nswq, &sc->sc_ba_task);
+	return EBUSY;
+}
+
+void
+mwx_ampdu_rx_stop(struct ieee80211com *ic, struct ieee80211_node *ni,
+    uint8_t tid)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
+
+	if (ni != ic->ic_bss || tid >= 8 || ic->ic_state != IEEE80211_S_RUN)
+		return;
+	sc->sc_ba_start &= ~(1U << tid);
+	sc->sc_ba_stop |= 1U << tid;
+	task_add(sc->sc_nswq, &sc->sc_ba_task);
 }
 
 void
@@ -1404,6 +1544,15 @@ mwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 
 	if (ic->ic_state == IEEE80211_S_RUN) {
 		/* cancel other tasks here */
+		sc->sc_ba_start = sc->sc_ba_stop = 0;
+	}
+
+	/* Runtime tunable: HT is advertised from the next association on. */
+	if (nstate == IEEE80211_S_SCAN || nstate == IEEE80211_S_AUTH) {
+		if (smtw_tune.ht)
+			ic->ic_flags |= IEEE80211_F_HTON;
+		else
+			ic->ic_flags &= ~IEEE80211_F_HTON;
 	}
 
 	sc->sc_ns_state = nstate;
@@ -2278,6 +2427,7 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	ic->ic_set_key = mwx_set_key;
 	ic->ic_delete_key = mwx_delete_key;
 	ic->ic_ampdu_rx_start = mwx_ampdu_rx_start;
+	ic->ic_ampdu_rx_stop = mwx_ampdu_rx_stop;
 
 	/* Override 802.11 state transition machine. */
 	sc->sc_newstate = ic->ic_newstate;
@@ -2294,6 +2444,7 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	task_set(&sc->sc_setkey_task, mwx_setkey_task, sc, "mwx_setkey");
 	task_set(&sc->sc_reset_task, mwx_reset_task, sc, "mwx_reset");
 	task_set(&sc->sc_scan_task, mwx_end_scan_task, sc, "mwx_scan");
+	task_set(&sc->sc_ba_task, mwx_ba_task, sc, "mwx_ba");
 	timeout_set(&sc->sc_reset_to, mwx_reset_timeo, sc);
 
 	/*

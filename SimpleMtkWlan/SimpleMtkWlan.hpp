@@ -77,6 +77,8 @@ public:
 #ifdef __PRIVATE_SPI__
     virtual IOReturn outputStart(IONetworkInterface *interface, IOOptionBits options) override;
 #endif
+    virtual IOReturn setProperties(OSObject *properties) override;
+    void publishTune();
     virtual IOReturn getPacketFilters(const OSSymbol *group, UInt32 *filters) const override;
     virtual IOReturn selectMedium(const IONetworkMedium *medium) override;
     virtual UInt32 getFeatures() const override;

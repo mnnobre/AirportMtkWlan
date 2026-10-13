@@ -24,6 +24,17 @@
 struct mwx_softc;
 struct pci_attach_args;
 
+/*
+ * Runtime tunables, set through the "SMTWTune" property of the
+ * SimpleMtkWlan service (see SimpleMtkWlan::setProperties). They take
+ * effect on the next association.
+ */
+struct smtw_tune_t {
+	int ht;		/* advertise 802.11n (HT20) */
+	int ba;		/* accept RX Block Ack agreements (A-MPDU RX) */
+};
+extern struct smtw_tune_t smtw_tune;
+
 class MtkMwx : public MtkHalService, MtkDriverInfo, MtkDriverController {
     OSDeclareDefaultStructors(MtkMwx)
 

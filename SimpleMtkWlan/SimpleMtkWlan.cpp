@@ -378,7 +378,44 @@ bool SimpleMtkWlan::start(IOService *provider)
     bool ok = startImpl(provider);
     XYLog("start %s\n", ok ? "succeeded" : "FAILED");
     smtw_log_publish(provider);
+    if (ok)
+        publishTune();
     return ok;
+}
+
+// Runtime tunables (smtw_tune in MtkMwx.cpp), e.g. from user space:
+//   IORegistryEntrySetCFProperty(service, "SMTWTune", {"ht": 1, "ba": 1})
+// They apply from the next association. The current values are published
+// back as the "SMTWTune" property.
+void SimpleMtkWlan::publishTune()
+{
+    OSDictionary *d = OSDictionary::withCapacity(2);
+    if (!d)
+        return;
+    OSNumber *ht = OSNumber::withNumber(smtw_tune.ht, 32);
+    OSNumber *ba = OSNumber::withNumber(smtw_tune.ba, 32);
+    if (ht) { d->setObject("ht", ht); ht->release(); }
+    if (ba) { d->setObject("ba", ba); ba->release(); }
+    setProperty("SMTWTune", d);
+    d->release();
+}
+
+IOReturn SimpleMtkWlan::setProperties(OSObject *properties)
+{
+    OSDictionary *props = OSDynamicCast(OSDictionary, properties);
+    OSDictionary *tune = props ?
+        OSDynamicCast(OSDictionary, props->getObject("SMTWTune")) : NULL;
+    if (!tune)
+        return kIOReturnUnsupported;
+
+    OSNumber *n;
+    if ((n = OSDynamicCast(OSNumber, tune->getObject("ht"))))
+        smtw_tune.ht = n->unsigned32BitValue() ? 1 : 0;
+    if ((n = OSDynamicCast(OSNumber, tune->getObject("ba"))))
+        smtw_tune.ba = n->unsigned32BitValue() ? 1 : 0;
+    XYLog("tune ht=%d ba=%d\n", smtw_tune.ht, smtw_tune.ba);
+    publishTune();
+    return kIOReturnSuccess;
 }
 
 bool SimpleMtkWlan::startImpl(IOService *provider)
