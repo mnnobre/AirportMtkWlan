@@ -389,13 +389,17 @@ bool SimpleMtkWlan::start(IOService *provider)
 // back as the "SMTWTune" property.
 void SimpleMtkWlan::publishTune()
 {
-    OSDictionary *d = OSDictionary::withCapacity(2);
+    OSDictionary *d = OSDictionary::withCapacity(4);
     if (!d)
         return;
     OSNumber *ht = OSNumber::withNumber(smtw_tune.ht, 32);
     OSNumber *ba = OSNumber::withNumber(smtw_tune.ba, 32);
+    OSNumber *vht = OSNumber::withNumber(smtw_tune.vht, 32);
+    OSNumber *bw = OSNumber::withNumber(smtw_tune.bw, 32);
     if (ht) { d->setObject("ht", ht); ht->release(); }
     if (ba) { d->setObject("ba", ba); ba->release(); }
+    if (vht) { d->setObject("vht", vht); vht->release(); }
+    if (bw) { d->setObject("bw", bw); bw->release(); }
     setProperty("SMTWTune", d);
     d->release();
 }
@@ -413,7 +417,14 @@ IOReturn SimpleMtkWlan::setProperties(OSObject *properties)
         smtw_tune.ht = n->unsigned32BitValue() ? 1 : 0;
     if ((n = OSDynamicCast(OSNumber, tune->getObject("ba"))))
         smtw_tune.ba = n->unsigned32BitValue() ? 1 : 0;
-    XYLog("tune ht=%d ba=%d\n", smtw_tune.ht, smtw_tune.ba);
+    if ((n = OSDynamicCast(OSNumber, tune->getObject("vht"))))
+        smtw_tune.vht = n->unsigned32BitValue() ? 1 : 0;
+    if ((n = OSDynamicCast(OSNumber, tune->getObject("bw")))) {
+        UInt32 bw = n->unsigned32BitValue();
+        smtw_tune.bw = bw >= 80 ? 80 : (bw >= 40 ? 40 : 20);
+    }
+    XYLog("tune ht=%d ba=%d vht=%d bw=%d\n", smtw_tune.ht, smtw_tune.ba,
+        smtw_tune.vht, smtw_tune.bw);
     publishTune();
     // "reassoc": rejoin now with the same SSID and key to apply the change.
     if ((n = OSDynamicCast(OSNumber, tune->getObject("reassoc"))) &&

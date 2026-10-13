@@ -405,6 +405,7 @@ struct mwx_softc {
 	struct task		sc_reassoc_task;
 	uint8_t			sc_ba_start;	/* TIDs to enable, bitmask */
 	uint8_t			sc_ba_stop;	/* TIDs to disable, bitmask */
+	uint8_t			sc_chw_valid;	/* ic_bss ni_chw negotiated */
 	CTimeout		*sc_reset_to;
 	u_int			sc_flags;
 #define MWX_FLAG_SCANNING		0x01
@@ -690,7 +691,8 @@ int		mt7921_mcu_hw_scan(struct mwx_softc *, int);
 int		mt7921_mcu_hw_scan_cancel(struct mwx_softc *);
 int		mt7921_mcu_set_mac_enable(struct mwx_softc *, int, int);
 int		mt7921_mcu_set_channel_domain(struct mwx_softc *);
-uint8_t		mt7921_mcu_chan_bw(struct ieee80211_channel *channel);
+void		mwx_bss_chandef(struct mwx_softc *, struct ieee80211_channel *,
+		    uint8_t *, uint8_t *, uint8_t *);
 int		mt7921_mcu_set_chan_info(struct mwx_softc *, int);
 void		mt7921_mcu_build_sku(struct mwx_softc *, int, int8_t *);
 int		mt7921_mcu_rate_txpower_band(struct mwx_softc *, int,
@@ -1020,6 +1022,7 @@ static uint32_t smtw_rxrate_sgi;
 /* RX diagnostics: rate histogram and Block Ack activity. */
 static uint32_t smtw_rx_ofdm[8];	/* by OFDM rate code 0x8..0xf */
 static uint32_t smtw_rx_htmcs[16];
+static uint32_t smtw_rx_vhtmcs[10];	/* any NSS */
 static uint32_t smtw_addba_req, smtw_addba_ok, smtw_addba_fail;
 static uint8_t smtw_rxrate_maxidx[16];
 
@@ -1035,6 +1038,8 @@ smtw_rxrate_account(uint32_t v0)
 		smtw_rx_ofdm[idx - 8]++;
 	else if ((mode == 2 || mode == 3) && idx < 16)
 		smtw_rx_htmcs[idx]++;
+	else if (mode == 4 && (idx & 0xf) < 10)
+		smtw_rx_vhtmcs[idx & 0xf]++;
 	if (idx > smtw_rxrate_maxidx[mode])
 		smtw_rxrate_maxidx[mode] = idx;
 	smtw_rxrate_bw[bw & 3]++;
@@ -1050,7 +1055,7 @@ smtw_rxrate_account(uint32_t v0)
  */
 static uint32_t smtw_tx_stall, smtw_tx_resume, smtw_tx_drop;
 
-struct smtw_tune_t smtw_tune = { 1, 1 };
+struct smtw_tune_t smtw_tune = { 1, 1, 0, 20 };
 
 
 static inline int	mwx_dma_free_slots(struct mwx_queue *);
@@ -1146,7 +1151,8 @@ mwx_watchdog(struct ifnet *ifp)
 			/* OFDM codes 0x8..0xf listed by speed: 6 9 12 18 24 36 48 54. */
 			MWX_DEV_LOG(sc, "rxhist ofdm %u %u %u %u %u %u %u %u | "
 			    "ht mcs0-7 %u %u %u %u %u %u %u %u mcs8-15 %u %u %u "
-			    "%u %u %u %u %u\n",
+			    "%u %u %u %u %u | vht mcs0-9 %u %u %u %u %u %u %u %u "
+			    "%u %u\n",
 			    smtw_rx_ofdm[3], smtw_rx_ofdm[7], smtw_rx_ofdm[2],
 			    smtw_rx_ofdm[6], smtw_rx_ofdm[1], smtw_rx_ofdm[5],
 			    smtw_rx_ofdm[0], smtw_rx_ofdm[4],
@@ -1155,7 +1161,11 @@ mwx_watchdog(struct ifnet *ifp)
 			    smtw_rx_htmcs[6], smtw_rx_htmcs[7], smtw_rx_htmcs[8],
 			    smtw_rx_htmcs[9], smtw_rx_htmcs[10], smtw_rx_htmcs[11],
 			    smtw_rx_htmcs[12], smtw_rx_htmcs[13], smtw_rx_htmcs[14],
-			    smtw_rx_htmcs[15]);
+			    smtw_rx_htmcs[15], smtw_rx_vhtmcs[0], smtw_rx_vhtmcs[1],
+			    smtw_rx_vhtmcs[2], smtw_rx_vhtmcs[3], smtw_rx_vhtmcs[4],
+			    smtw_rx_vhtmcs[5], smtw_rx_vhtmcs[6], smtw_rx_vhtmcs[7],
+			    smtw_rx_vhtmcs[8], smtw_rx_vhtmcs[9]);
+			memset(smtw_rx_vhtmcs, 0, sizeof(smtw_rx_vhtmcs));
 			memset(smtw_rx_ofdm, 0, sizeof(smtw_rx_ofdm));
 			memset(smtw_rx_htmcs, 0, sizeof(smtw_rx_htmcs));
 		}
@@ -1584,6 +1594,20 @@ mwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 			ic->ic_flags |= IEEE80211_F_HTON;
 		else
 			ic->ic_flags &= ~IEEE80211_F_HTON;
+		/* 40 MHz is HT capability CBW20_40 plus SGI40. */
+		if (smtw_tune.ht && smtw_tune.bw >= 40)
+			ic->ic_htcaps |= IEEE80211_HTCAP_CBW20_40 |
+			    IEEE80211_HTCAP_SGI40;
+		else
+			ic->ic_htcaps &= ~(IEEE80211_HTCAP_CBW20_40 |
+			    IEEE80211_HTCAP_SGI40);
+		/* VHT implies 80 MHz support; never advertise HE. */
+		if (smtw_tune.ht && smtw_tune.vht && smtw_tune.bw >= 80)
+			ic->ic_flags |= IEEE80211_F_VHTON;
+		else
+			ic->ic_flags &= ~IEEE80211_F_VHTON;
+		ic->ic_flags &= ~IEEE80211_F_HEON;
+		sc->sc_chw_valid = 0;
 	}
 
 	sc->sc_ns_state = nstate;
@@ -1672,6 +1696,31 @@ mwx_newstate_task(void *ptr)
 
 		mt7921_mcu_hw_scan_cancel(sc);
 		mwx_mcu_set_deep_sleep(sc, 0);
+		/*
+		 * The association response has been parsed: ni_chw and the
+		 * center frequency are known. AUTH tuned the 20 MHz control
+		 * channel; widen it now if 40/80 MHz was negotiated.
+		 */
+		sc->sc_chw_valid = 1;
+		MWX_DEV_LOG(sc, "negotiated chw=%d center=%u ht=%d vht=%d "
+		    "vhtcaps=0x%08x vhtmcs rx=0x%04x tx=0x%04x\n",
+		    ic->ic_bss->ni_chw, ic->ic_bss->ni_chan->ic_center_freq1,
+		    !!(ic->ic_bss->ni_flags & IEEE80211_NODE_HT),
+		    !!(ic->ic_bss->ni_flags & IEEE80211_NODE_VHT),
+		    ic->ic_bss->ni_vhtcaps,
+		    le16toh(ic->ic_bss->ni_vht_mcsinfo.rx_mcs_map),
+		    le16toh(ic->ic_bss->ni_vht_mcsinfo.tx_mcs_map));
+		if (ic->ic_bss->ni_chw == IEEE80211_CHAN_WIDTH_40 ||
+		    ic->ic_bss->ni_chw == IEEE80211_CHAN_WIDTH_80) {
+			rv = mt7921_mcu_set_chan_info(sc,
+			    MCU_EXT_CMD_CHANNEL_SWITCH);
+			MWX_DEV_LOG(sc, "wide channel switch rv=%d\n", rv);
+			if (rv) {
+				/* Stay on 20 MHz rather than reset in a loop. */
+				sc->sc_chw_valid = 0;
+				rv = 0;
+			}
+		}
 		rv = mt7921_mcu_set_associated_bss(sc, 1);
 		if (!rv && (ic->ic_bss->ni_flags & IEEE80211_NODE_HT)) {
 			/*
@@ -2223,13 +2272,15 @@ mwx_preinit(struct mwx_softc *sc)
 			ic->ic_channels[chan].ic_freq =
 			    ieee80211_ieee2mhz(chan, IEEE80211_CHAN_5GHZ);
 			/*
-			 * HT20 only: in this net80211 IEEE80211_CHAN_HT also
-			 * includes HT40U/D, which makes mt7921_mcu_chan_bw()
-			 * pick 40 MHz.
+			 * HT40/VHT80 capable. What is used is decided per
+			 * association from the tunables (ic_htcaps CBW20_40,
+			 * IEEE80211_F_VHTON) and programmed from ni_chw, not
+			 * from these flags (see mwx_bss_chandef()).
 			 */
 			ic->ic_channels[chan].ic_flags = IEEE80211_CHAN_A |
-			    IEEE80211_CHAN_HT20;
-			/* TODO 40/80 MHz and 11ac flags */
+			    IEEE80211_CHAN_HT20 | IEEE80211_CHAN_HT40 |
+			    IEEE80211_CHAN_VHT20 | IEEE80211_CHAN_VHT40 |
+			    IEEE80211_CHAN_VHT80;
 		}
 	}
 #ifdef NOTYET
@@ -2413,14 +2464,19 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	ic->ic_aselcaps = 0;
 	ic->ic_ampdu_params = (IEEE80211_AMPDU_PARAM_SS_4 | 0x3 /* 64k */);
 
-#if NOTYET
-	ic->ic_vhtcaps = IEEE80211_VHTCAP_MAX_MPDU_LENGTH_11454 |
-	    (IEEE80211_VHTCAP_MAX_AMPDU_LEN_64K <<
-	    IEEE80211_VHTCAP_MAX_AMPDU_LEN_SHIFT) |
-	    (IEEE80211_VHTCAP_CHAN_WIDTH_80 <<
-	    IEEE80211_VHTCAP_CHAN_WIDTH_SHIFT) | IEEE80211_VHTCAP_SGI80 |
-	    IEEE80211_VHTCAP_RX_ANT_PATTERN | IEEE80211_VHTCAP_TX_ANT_PATTERN;
-#endif
+	/*
+	 * VHT, advertised only with the vht tunable (IEEE80211_F_VHTON).
+	 * Smallest MPDU size: RX buffers are 2 KB and A-MSDU is not
+	 * accepted in Block Ack, so MPDUs stay below that. No LDPC/STBC/
+	 * beamforming yet. MCS 0-9 on 2 spatial streams.
+	 */
+	ic->ic_vhtcaps = IEEE80211_VHTCAP_MAX_MPDU_LENGTH_3895 |
+	    IEEE80211_VHTCAP_SHORT_GI_80 |
+	    (7 << IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT);
+	ic->ic_vht_rx_mcs_map = htole16(0xfffa);
+	ic->ic_vht_tx_mcs_map = htole16(0xfffa);
+	ic->ic_vht_rx_highest = 0;
+	ic->ic_vht_tx_highest = 0;
 
 	/* IBSS channel undefined for now. */
 	ic->ic_ibss_chan = &ic->ic_channels[1];
@@ -5129,20 +5185,35 @@ mt7921_mcu_set_channel_domain(struct mwx_softc *sc)
 	return rv;
 }
 
-uint8_t
-mt7921_mcu_chan_bw(struct ieee80211_channel *channel)
+/*
+ * Channel width and center for the firmware. Until the association
+ * response has been parsed (sc_chw_valid, set on RUN) this is the
+ * 20 MHz control channel; afterwards it is what net80211 negotiated
+ * (ni_chw, center in ni_chan->ic_center_freq1). Channel flags only say
+ * what a channel could do, so they are not used here.
+ */
+void
+mwx_bss_chandef(struct mwx_softc *sc, struct ieee80211_channel *channel,
+    uint8_t *bw, uint8_t *control, uint8_t *center)
 {
-	/*
-	 * following modes are not yet supported
-	 *  CMD_CBW_5MHZ, CMD_CBW_10MHZ, CMD_CBW_8080MHZ
-	 */
-	if (channel->ic_flags & IEEE80211_CHAN_VHT160)
-		return CMD_CBW_160MHZ;
-	if (channel->ic_flags & IEEE80211_CHAN_VHT80)
-		return CMD_CBW_80MHZ;
-	if (channel->ic_flags & IEEE80211_CHAN_40MHZ)
-		return CMD_CBW_40MHZ;
-	return CMD_CBW_20MHZ;
+	struct ieee80211_node *ni = sc->sc_ic.ic_bss;
+
+	*control = ieee80211_mhz2ieee(channel->ic_freq, 0);
+	*center = *control;
+	*bw = CMD_CBW_20MHZ;
+	if (!sc->sc_chw_valid || ni == NULL || ni->ni_chan != channel)
+		return;
+	switch (ni->ni_chw) {
+	case IEEE80211_CHAN_WIDTH_40:
+		*bw = CMD_CBW_40MHZ;
+		break;
+	case IEEE80211_CHAN_WIDTH_80:
+		*bw = CMD_CBW_80MHZ;
+		break;
+	default:
+		return;
+	}
+	*center = ieee80211_mhz2ieee(channel->ic_center_freq1, 0);
 }
 
 int
@@ -5177,11 +5248,8 @@ mt7921_mcu_set_chan_info(struct mwx_softc *sc, int cmd)
 	else
 		channel = sc->sc_ic.ic_ibss_chan;
 
-	req.control_ch = ieee80211_mhz2ieee(channel->ic_freq,
-		    channel->ic_flags);
-	req.center_ch = ieee80211_mhz2ieee(channel->ic_freq,
-		    channel->ic_flags);
-	req.bw = mt7921_mcu_chan_bw(channel);
+	mwx_bss_chandef(sc, channel, &req.bw, &req.control_ch,
+	    &req.center_ch);
 
 #ifdef NOTYET
 	if (channel->ic_flags & IEEE80211_CHAN_6GHZ)
@@ -6602,6 +6670,32 @@ mt7921_mcu_add_basic_tlv(struct mbuf *m, uint16_t *tlvnum, struct mwx_softc *sc,
 	basic->qos = (ni->ni_flags & IEEE80211_NODE_QOS) != 0;
 }
 
+/* Spatial streams usable in a VHT MCS map (2 bits per stream, 3 = none). */
+static int
+mwx_vht_nss(uint16_t map)
+{
+	int i, nss = 0;
+
+	for (i = 0; i < 8; i++)
+		if (((map >> (i * 2)) & 3) != IEEE80211_VHT_MCS_NOT_SUPPORTED)
+			nss = i + 1;
+	return nss;
+}
+
+/* ni_chw as mac80211's ieee80211_sta_rx_bandwidth: 0 20, 1 40, 2 80. */
+static uint8_t
+mwx_sta_bw(struct ieee80211_node *ni)
+{
+	switch (ni->ni_chw) {
+	case IEEE80211_CHAN_WIDTH_40:
+		return 1;
+	case IEEE80211_CHAN_WIDTH_80:
+		return 2;
+	default:
+		return 0;
+	}
+}
+
 void
 mt7921_mcu_add_sta_tlv(struct mbuf *m, uint16_t *tlvnum, struct mwx_softc *sc,
     struct ieee80211_node *ni, int add, int isnew)
@@ -6662,12 +6756,28 @@ mt7921_mcu_add_sta_tlv(struct mbuf *m, uint16_t *tlvnum, struct mwx_softc *sc,
 		struct sta_rec_ht *ht;
 		uint16_t cap = ni->ni_htcaps;
 
-		/* We run the BSS at 20 MHz and without LDPC for now. */
-		cap &= ~(IEEE80211_HTCAP_CBW20_40 | IEEE80211_HTCAP_SGI40 |
-		    IEEE80211_HTCAP_LDPC);
+		/* No LDPC yet; 40 MHz only when it was negotiated. */
+		cap &= ~IEEE80211_HTCAP_LDPC;
+		if (ni->ni_chw == IEEE80211_CHAN_WIDTH_20)
+			cap &= ~(IEEE80211_HTCAP_CBW20_40 |
+			    IEEE80211_HTCAP_SGI40);
 		ht = (struct sta_rec_ht *)mwx_append_tlv(m, tlvnum, STA_REC_HT,
 		    sizeof(*ht));
 		ht->ht_cap = htole16(cap);
+	}
+
+	/* ni_vhtcaps and MCS maps are already intersected with ours. */
+	if (ni->ni_flags & IEEE80211_NODE_VHT) {
+		struct sta_rec_vht *vht;
+
+		vht = (struct sta_rec_vht *)mwx_append_tlv(m, tlvnum,
+		    STA_REC_VHT, sizeof(*vht));
+		vht->vht_cap = htole32(ni->ni_vhtcaps &
+		    ~IEEE80211_VHTCAP_RXLDPC);
+		vht->vht_rx_mcs_map = ni->ni_vht_mcsinfo.rx_mcs_map;
+		vht->vht_tx_mcs_map = ni->ni_vht_mcsinfo.tx_mcs_map;
+		vht->rts_bw_sig = 0;
+		memset(vht->rsv, 0, sizeof(vht->rsv));
 	}
 
 	phy = (struct sta_rec_phy *)mwx_append_tlv(m, tlvnum, STA_REC_PHY,
@@ -6712,13 +6822,14 @@ mt7921_mcu_add_sta_tlv(struct mbuf *m, uint16_t *tlvnum, struct mwx_softc *sc,
 	    STA_REC_STATE, sizeof(*state));
 	/* AUTH-time record is NONE, the update after association is ASSOC. */
 	state->state = isnew ? 0 : 2;
-#ifdef NOTYET
-	if (sta->deflink.vht_cap.vht_supported) {
-		state->vht_opmode = sta->deflink.bandwidth;
-		state->vht_opmode |= (sta->deflink.rx_nss - 1) <<
-			IEEE80211_OPMODE_NOTIF_RX_NSS_SHIFT;
+	if (ni->ni_flags & IEEE80211_NODE_VHT) {
+		int nss = mwx_vht_nss(le16toh(ni->ni_vht_mcsinfo.rx_mcs_map));
+
+		/* bandwidth | (rx_nss - 1) << 4, as Linux. */
+		state->vht_opmode = mwx_sta_bw(ni);
+		if (nss > 0)
+			state->vht_opmode |= (nss - 1) << 4;
 	}
-#endif
 }
 
 int
@@ -6793,6 +6904,25 @@ mt7921_mcu_wtbl_ht_tlv(struct mbuf *m, uint16_t *tlvnum,
 		ht->af = ni->ni_ampdu_param & 0x03;
 		ht->mm = (ni->ni_ampdu_param >> 2) & 0x07;
 		len += sizeof(*ht);
+
+		if (ni->ni_flags & IEEE80211_NODE_VHT) {
+			struct wtbl_vht *vht;
+			uint8_t af = (ni->ni_vhtcaps >>
+			    IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT) &
+			    0x7;
+
+			vht = (struct wtbl_vht *)mwx_append_tlv(m, tlvnum,
+			    WTBL_VHT, sizeof(*vht));
+			vht->ldpc = 0;
+			vht->dyn_bw = 0;
+			vht->vht = 1;
+			vht->txop_ps = 0;
+			memset(vht->rsv, 0, sizeof(vht->rsv));
+			len += sizeof(*vht);
+			/* As Linux: A-MPDU factor is the larger of HT/VHT. */
+			if (af > ht->af)
+				ht->af = af;
+		}
 	}
 
 	smps = (struct wtbl_smps *)mwx_append_tlv(m, tlvnum, WTBL_SMPS,
@@ -7366,8 +7496,6 @@ mt7921_mcu_set_associated_bss(struct mwx_softc *sc, int associated)
 	if (ni == NULL || ni->ni_chan == NULL ||
 	    ni->ni_chan == IEEE80211_CHAN_ANYC)
 		return EINVAL;
-	if (mt7921_mcu_chan_bw(ni->ni_chan) != CMD_CBW_20MHZ)
-		return EOPNOTSUPP;
 	is_2g = IEEE80211_IS_CHAN_2GHZ(ni->ni_chan);
 	bss.bss_idx = mvif->idx;
 	bss.basic.tag = htole16(UNI_BSS_INFO_BASIC);
@@ -7389,6 +7517,8 @@ mt7921_mcu_set_associated_bss(struct mwx_softc *sc, int associated)
 	bss.basic.phymode = is_2g ? (PHY_MODE_B | PHY_MODE_G) : PHY_MODE_A;
 	if (ni->ni_flags & IEEE80211_NODE_HT)
 		bss.basic.phymode |= is_2g ? PHY_MODE_GN : PHY_MODE_AN;
+	if (!is_2g && (ni->ni_flags & IEEE80211_NODE_VHT))
+		bss.basic.phymode |= PHY_MODE_AC;
 	bss.basic.nonht_basic_phy = htole16(is_2g ?
 	    PHY_TYPE_BIT_HR_DSSS | PHY_TYPE_BIT_ERP : PHY_TYPE_BIT_OFDM);
 	rv = mwx_send_assoc_status(sc, MCU_UNI_CMD_BSS_INFO_UPDATE, &bss, sizeof(bss));
@@ -7400,16 +7530,22 @@ mt7921_mcu_set_associated_bss(struct mwx_softc *sc, int associated)
 	channel.bss_idx = mvif->idx;
 	channel.rlm.tag = htole16(UNI_BSS_INFO_RLM);
 	channel.rlm.len = htole16(sizeof(channel.rlm));
-	channel.rlm.control_channel = ieee80211_mhz2ieee(ni->ni_chan->ic_freq, 0);
-	channel.rlm.center_chan = channel.rlm.control_channel;
-	channel.rlm.bw = CMD_CBW_20MHZ;
+	mwx_bss_chandef(sc, ni->ni_chan, &channel.rlm.bw,
+	    &channel.rlm.control_channel, &channel.rlm.center_chan);
+	/* Secondary channel offset, as mt76_connac_mcu_uni_set_chctx(). */
+	if (channel.rlm.control_channel < channel.rlm.center_chan)
+		channel.rlm.sco = 1;	/* SCA */
+	else if (channel.rlm.control_channel > channel.rlm.center_chan)
+		channel.rlm.sco = 3;	/* SCB */
 	channel.rlm.tx_streams = sc->sc_capa.num_streams;
 	channel.rlm.rx_streams = sc->sc_capa.antenna_mask;
 	channel.rlm.short_st = 1;
 	channel.rlm.band = is_2g ? 0 : 1;
 	rv = mwx_send_assoc_status(sc, MCU_UNI_CMD_BSS_INFO_UPDATE,
 	    &channel, sizeof(channel));
-	MWX_DEV_LOG(sc, "associated BSS RLM channel=%u band=%u rv=%d\n",
-	    channel.rlm.control_channel, channel.rlm.band, rv);
+	MWX_DEV_LOG(sc, "associated BSS RLM channel=%u center=%u bw=%u "
+	    "sco=%u band=%u rv=%d\n", channel.rlm.control_channel,
+	    channel.rlm.center_chan, channel.rlm.bw, channel.rlm.sco,
+	    channel.rlm.band, rv);
 	return rv;
 }

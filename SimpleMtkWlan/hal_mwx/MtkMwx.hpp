@@ -32,6 +32,8 @@ struct pci_attach_args;
 struct smtw_tune_t {
 	int ht;		/* advertise 802.11n (HT20) */
 	int ba;		/* accept RX Block Ack agreements (A-MPDU RX) */
+	int vht;	/* advertise 802.11ac (VHT), needs bw=80 */
+	int bw;		/* max channel width to advertise: 20, 40 or 80 MHz */
 };
 extern struct smtw_tune_t smtw_tune;
 struct ieee80211com;

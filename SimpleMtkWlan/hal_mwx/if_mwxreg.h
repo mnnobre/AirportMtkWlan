@@ -1350,6 +1350,18 @@ struct sta_rec_ht {
 	uint16_t	rsv;
 } __packed;
 
+/* As struct sta_rec_vht in Linux mt76_connac_mcu.h. */
+#define	STA_REC_VHT			0x0a
+struct sta_rec_vht {
+	uint16_t	tag;
+	uint16_t	len;
+	uint32_t	vht_cap;
+	uint16_t	vht_rx_mcs_map;
+	uint16_t	vht_tx_mcs_map;
+	uint8_t		rts_bw_sig;
+	uint8_t		rsv[3];
+} __packed;
+
 #define	STA_REC_STATE			0x07
 struct sta_rec_state {
 	uint16_t	tag;
@@ -1465,6 +1477,17 @@ struct wtbl_ht {
 	uint8_t		ldpc;
 	uint8_t		af;
 	uint8_t		mm;
+	uint8_t		rsv[4];
+} __packed;
+
+#define	WTBL_VHT			0x03
+struct wtbl_vht {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		ldpc;
+	uint8_t		dyn_bw;
+	uint8_t		vht;
+	uint8_t		txop_ps;
 	uint8_t		rsv[4];
 } __packed;
 
@@ -1619,6 +1642,7 @@ enum mt76_phy_type {
 #define	PHY_MODE_G			(1U << 2)
 #define	PHY_MODE_GN			(1U << 3)
 #define	PHY_MODE_AN			(1U << 4)
+#define	PHY_MODE_AC			(1U << 5)
 #define	PHY_TYPE_BIT_VHT		(1U << 5)
 #define	PHY_TYPE_BIT_HE			(1U << 6)
 
