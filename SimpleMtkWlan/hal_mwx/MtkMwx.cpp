@@ -1021,6 +1021,38 @@ smtw_rxrate_account(uint32_t v0)
 		smtw_rxrate_sgi++;
 }
 
+/*
+ * TX flow control. Without it a full TX ring or TXWI pool made mwx_tx()
+ * fail and the frame was dropped, which TCP reads as congestion. Now
+ * mwx_start() stops (oactive) while there is no room, frames wait in
+ * if_snd, and the TX-free event restarts output.
+ */
+static uint32_t smtw_tx_stall, smtw_tx_resume, smtw_tx_drop;
+
+static inline int	mwx_dma_free_slots(struct mwx_queue *);
+
+static int
+mwx_tx_has_room(struct mwx_softc *sc)
+{
+	return !LIST_EMPTY(&sc->sc_txwi.mt_freelist) &&
+	    mwx_dma_free_slots(&sc->sc_txq) >= 1;
+}
+
+static void
+mwx_tx_kick(struct mwx_softc *sc)
+{
+	struct ifnet *ifp = &sc->sc_ic.ic_if;
+
+	if (!ifq_is_oactive(&ifp->if_snd) || !mwx_tx_has_room(sc))
+		return;
+	ifq_clr_oactive(&ifp->if_snd);
+	smtw_tx_resume++;
+	mwx_start(ifp);
+	/* outputStart() returned NoResources; let IOKit pull again. */
+	if (ifp->iface != NULL && !ifq_is_oactive(&ifp->if_snd))
+		ifp->iface->signalOutputThread();
+}
+
 void
 mwx_watchdog(struct ifnet *ifp)
 {
@@ -1089,6 +1121,23 @@ mwx_watchdog(struct ifnet *ifp)
 			smtw_rxrate_sgi = 0;
 		}
 	}
+	if (sc != NULL && sc->sc_ic.ic_state == IEEE80211_S_RUN &&
+	    (wd_ticks % 2) == 0) {
+		static uint32_t last_stall, last_resume, last_drop;
+
+		if (smtw_tx_stall != last_stall ||
+		    smtw_tx_resume != last_resume ||
+		    smtw_tx_drop != last_drop) {
+			MWX_DEV_LOG(sc, "txflow stall=%u resume=%u drop=%u "
+			    "snd=%u oactive=%u ring_free=%d\n", smtw_tx_stall,
+			    smtw_tx_resume, smtw_tx_drop, ifq_len(&ifp->if_snd),
+			    ifq_is_oactive(&ifp->if_snd),
+			    mwx_dma_free_slots(&sc->sc_txq));
+			last_stall = smtw_tx_stall;
+			last_resume = smtw_tx_resume;
+			last_drop = smtw_tx_drop;
+		}
+	}
 }
 
 void
@@ -1104,9 +1153,11 @@ mwx_start(struct ifnet *ifp)
 		return;
 
 	for (;;) {
-		/* XXX TODO handle oactive
+		if (!mwx_tx_has_room(sc)) {
 			ifq_set_oactive(&ifp->if_snd);
-		*/
+			smtw_tx_stall++;
+			break;
+		}
 
 		/* need to send management frames even if we're not RUNning */
 		m = mq_dequeue(&ic->ic_mgtq);
@@ -1147,6 +1198,7 @@ mwx_start(struct ifnet *ifp)
 		ieee80211_release_node(ic, ni);
 		if (rv != 0) {
 			ifp->if_oerrors++;
+			smtw_tx_drop++;
 			continue;
 		}
 
@@ -3030,7 +3082,7 @@ mwx_dma_tx_done(struct mwx_softc *sc)
 	mwx_dma_tx_cleanup(sc, &sc->sc_txmcuq);
 	mwx_dma_tx_cleanup(sc, &sc->sc_txfwdlq);
 
-	/* XXX do we need to wakeup someone */
+	mwx_tx_kick(sc);
 }
 
 /* XXX wrong place */
@@ -6186,6 +6238,7 @@ mwx_mac_tx_free(struct mwx_softc *sc, struct mbuf *m)
 
 out:
 	m_freem(m);
+	mwx_tx_kick(sc);
 }
 
 int
