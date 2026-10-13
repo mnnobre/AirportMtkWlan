@@ -1063,6 +1063,9 @@ smtw_rxrate_account(uint32_t v0)
  */
 static uint32_t smtw_tx_stall, smtw_tx_resume, smtw_tx_drop;
 
+/* net80211 (ieee80211.c), not exported in a header. */
+void	ieee80211_configure_ampdu_tx(struct ieee80211com *, int);
+
 struct smtw_tune_t smtw_tune = { 1, 1, 1, 80, 0, 2048 };
 
 
@@ -1679,10 +1682,18 @@ mwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 			ic->ic_flags &= ~IEEE80211_F_VHTON;
 		ic->ic_flags &= ~IEEE80211_F_HEON;
 		/* net80211 asks for TX Block Ack only with this capability. */
-		if (smtw_tune.ht && smtw_tune.txba)
+		/*
+		 * IEEE80211_F_QOS (QoS data, needed to trigger ADDBA) is only
+		 * set by ieee80211_configure_ampdu_tx() while the capability
+		 * is present, so call it after every change.
+		 */
+		if (smtw_tune.ht && smtw_tune.txba) {
 			ic->ic_caps |= IEEE80211_C_TX_AMPDU;
-		else
+			ieee80211_configure_ampdu_tx(ic, 1);
+		} else {
+			ieee80211_configure_ampdu_tx(ic, 0);
 			ic->ic_caps &= ~IEEE80211_C_TX_AMPDU;
+		}
 		sc->sc_chw_valid = 0;
 	}
 
