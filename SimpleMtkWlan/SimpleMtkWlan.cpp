@@ -389,17 +389,21 @@ bool SimpleMtkWlan::start(IOService *provider)
 // back as the "SMTWTune" property.
 void SimpleMtkWlan::publishTune()
 {
-    OSDictionary *d = OSDictionary::withCapacity(4);
+    OSDictionary *d = OSDictionary::withCapacity(6);
     if (!d)
         return;
     OSNumber *ht = OSNumber::withNumber(smtw_tune.ht, 32);
     OSNumber *ba = OSNumber::withNumber(smtw_tune.ba, 32);
     OSNumber *vht = OSNumber::withNumber(smtw_tune.vht, 32);
     OSNumber *bw = OSNumber::withNumber(smtw_tune.bw, 32);
+    OSNumber *txba = OSNumber::withNumber(smtw_tune.txba, 32);
+    OSNumber *sndq = OSNumber::withNumber(smtw_tune.sndq, 32);
     if (ht) { d->setObject("ht", ht); ht->release(); }
     if (ba) { d->setObject("ba", ba); ba->release(); }
     if (vht) { d->setObject("vht", vht); vht->release(); }
     if (bw) { d->setObject("bw", bw); bw->release(); }
+    if (txba) { d->setObject("txba", txba); txba->release(); }
+    if (sndq) { d->setObject("sndq", sndq); sndq->release(); }
     setProperty("SMTWTune", d);
     d->release();
 }
@@ -423,8 +427,19 @@ IOReturn SimpleMtkWlan::setProperties(OSObject *properties)
         UInt32 bw = n->unsigned32BitValue();
         smtw_tune.bw = bw >= 80 ? 80 : (bw >= 40 ? 40 : 20);
     }
-    XYLog("tune ht=%d ba=%d vht=%d bw=%d\n", smtw_tune.ht, smtw_tune.ba,
-        smtw_tune.vht, smtw_tune.bw);
+    if ((n = OSDynamicCast(OSNumber, tune->getObject("txba"))))
+        smtw_tune.txba = n->unsigned32BitValue() ? 1 : 0;
+    // Shorter if_snd means less queueing delay under load (tail drop).
+    if ((n = OSDynamicCast(OSNumber, tune->getObject("sndq")))) {
+        UInt32 q = n->unsigned32BitValue();
+        smtw_tune.sndq = q < 32 ? 32 : (q > 4096 ? 4096 : q);
+        struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
+        if (ifp->if_snd.queue != NULL)
+            ifq_set_maxlen(&ifp->if_snd, smtw_tune.sndq);
+    }
+    XYLog("tune ht=%d ba=%d vht=%d bw=%d txba=%d sndq=%d\n", smtw_tune.ht,
+        smtw_tune.ba, smtw_tune.vht, smtw_tune.bw, smtw_tune.txba,
+        smtw_tune.sndq);
     publishTune();
     // "reassoc": rejoin now with the same SSID and key to apply the change.
     if ((n = OSDynamicCast(OSNumber, tune->getObject("reassoc"))) &&

@@ -405,6 +405,8 @@ struct mwx_softc {
 	struct task		sc_reassoc_task;
 	uint8_t			sc_ba_start;	/* TIDs to enable, bitmask */
 	uint8_t			sc_ba_stop;	/* TIDs to disable, bitmask */
+	uint8_t			sc_txba_start;	/* TX BA TIDs to enable */
+	uint8_t			sc_txba_stop;	/* TX BA TIDs to disable */
 	uint8_t			sc_chw_valid;	/* ic_bss ni_chw negotiated */
 	CTimeout		*sc_reset_to;
 	u_int			sc_flags;
@@ -602,7 +604,11 @@ void	mwx_ampdu_rx_stop(struct ieee80211com *, struct ieee80211_node *,
 void	mwx_ba_task(void *);
 void	mwx_reassoc_task(void *);
 int	mt7921_mcu_sta_ba(struct mwx_softc *, struct ieee80211_node *,
-	    uint8_t, int);
+	    uint8_t, int, int);
+int	mwx_ampdu_tx_start(struct ieee80211com *, struct ieee80211_node *,
+	    uint8_t);
+void	mwx_ampdu_tx_stop(struct ieee80211com *, struct ieee80211_node *,
+	    uint8_t);
 int	mwx_set_key(struct ieee80211com *, struct ieee80211_node *,
 	    struct ieee80211_key *);
 void	mwx_delete_key(struct ieee80211com *, struct ieee80211_node *,
@@ -980,6 +986,7 @@ mwx_stop(struct ifnet *ifp)
 		task_del(sc->sc_nswq, &sc->sc_reassoc_task);
 	}
 	sc->sc_ba_start = sc->sc_ba_stop = 0;
+	sc->sc_txba_start = sc->sc_txba_stop = 0;
 	task_del(systq, &sc->sc_scan_task);
 	timeout_del(&sc->sc_reset_to);
 
@@ -1024,6 +1031,7 @@ static uint32_t smtw_rx_ofdm[8];	/* by OFDM rate code 0x8..0xf */
 static uint32_t smtw_rx_htmcs[16];
 static uint32_t smtw_rx_vhtmcs[10];	/* any NSS */
 static uint32_t smtw_addba_req, smtw_addba_ok, smtw_addba_fail;
+static uint32_t smtw_txba_req, smtw_txba_ok, smtw_txba_fail;
 static uint8_t smtw_rxrate_maxidx[16];
 
 static void
@@ -1055,7 +1063,7 @@ smtw_rxrate_account(uint32_t v0)
  */
 static uint32_t smtw_tx_stall, smtw_tx_resume, smtw_tx_drop;
 
-struct smtw_tune_t smtw_tune = { 1, 1, 1, 80 };
+struct smtw_tune_t smtw_tune = { 1, 1, 1, 80, 0, 2048 };
 
 
 static inline int	mwx_dma_free_slots(struct mwx_queue *);
@@ -1182,14 +1190,16 @@ mwx_watchdog(struct ifnet *ifp)
 		    smtw_addba_req != last_addba) {
 			MWX_DEV_LOG(sc, "txflow stall=%u resume=%u drop=%u "
 			    "snd=%u oactive=%u ring_free=%d rxfail=%u "
-			    "addba req=%u ok=%u fail=%u tune ht=%d ba=%d\n",
+			    "addba req=%u ok=%u fail=%u txba req=%u ok=%u fail=%u "
+			    "tune ht=%d ba=%d txba=%d\n",
 			    smtw_tx_stall, smtw_tx_resume, smtw_tx_drop,
 			    ifq_len(&ifp->if_snd),
 			    ifq_is_oactive(&ifp->if_snd),
 			    mwx_dma_free_slots(&sc->sc_txq),
 			    sc->sc_rx_fill_fail, smtw_addba_req,
-			    smtw_addba_ok, smtw_addba_fail, smtw_tune.ht,
-			    smtw_tune.ba);
+			    smtw_addba_ok, smtw_addba_fail, smtw_txba_req,
+			    smtw_txba_ok, smtw_txba_fail, smtw_tune.ht,
+			    smtw_tune.ba, smtw_tune.txba);
 			last_stall = smtw_tx_stall;
 			last_resume = smtw_tx_resume;
 			last_drop = smtw_tx_drop;
@@ -1364,11 +1374,11 @@ mwx_node_alloc(struct ieee80211com *ic)
  */
 int
 mt7921_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni,
-    uint8_t tid, int enable)
+    uint8_t tid, int enable, int tx)
 {
 	struct mwx_node *mw = (struct mwx_node *)ni;
 	struct mwx_vif *mvif = &sc->sc_vif;
-	struct ieee80211_rx_ba *ba = &ni->ni_rx_ba[tid];
+	uint16_t ssn, winsize;
 	struct sta_rec_ba *rba;
 	struct mbuf *m;
 	uint16_t tlvnum = 0;
@@ -1380,12 +1390,19 @@ mt7921_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni,
 		return ENOBUFS;
 	rba = (struct sta_rec_ba *)mwx_append_tlv(m, &tlvnum, STA_REC_BA,
 	    sizeof(*rba));
+	if (tx) {
+		ssn = ni->ni_tx_ba[tid].ba_winstart;
+		winsize = ni->ni_tx_ba[tid].ba_winsize;
+	} else {
+		ssn = ni->ni_rx_ba[tid].ba_winstart;
+		winsize = ni->ni_rx_ba[tid].ba_winsize;
+	}
 	rba->tid = tid;
-	rba->ba_type = MT_BA_TYPE_RECIPIENT;
+	rba->ba_type = tx ? MT_BA_TYPE_ORIGINATOR : MT_BA_TYPE_RECIPIENT;
 	rba->amsdu = 0;
 	rba->ba_en = enable << tid;
-	rba->ssn = htole16(ba->ba_winstart);
-	rba->winsize = htole16(ba->ba_winsize);
+	rba->ssn = htole16(ssn);
+	rba->winsize = htole16(winsize);
 
 	m = mwx_fill_sta_req_hdr(m, mvif, mvif->omac_idx, mw->wcid, tlvnum);
 	if (m == NULL)
@@ -1395,8 +1412,8 @@ mt7921_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni,
 	if (rv == 0)
 		rv = mwx_mcu_wait_resp_int(sc, MCU_UNI_CMD_STA_REC_UPDATE, seq,
 		    &status);
-	MWX_DEV_LOG(sc, "rx ba tid=%u enable=%d ssn=%u win=%u transport=%d "
-	    "firmware=%u\n", tid, enable, ba->ba_winstart, ba->ba_winsize, rv,
+	MWX_DEV_LOG(sc, "%s ba tid=%u enable=%d ssn=%u win=%u transport=%d "
+	    "firmware=%u\n", tx ? "tx" : "rx", tid, enable, ssn, winsize, rv,
 	    status);
 	return rv ? rv : (status ? EIO : 0);
 }
@@ -1416,13 +1433,13 @@ mwx_ba_task(void *arg)
 		if (sc->sc_ba_stop & bit) {
 			sc->sc_ba_stop &= ~bit;
 			if (ic->ic_state == IEEE80211_S_RUN)
-				mt7921_mcu_sta_ba(sc, ni, tid, 0);
+				mt7921_mcu_sta_ba(sc, ni, tid, 0, 0);
 		}
 		if (sc->sc_ba_start & bit) {
 			sc->sc_ba_start &= ~bit;
 			if (ic->ic_state != IEEE80211_S_RUN)
 				continue;
-			if (mt7921_mcu_sta_ba(sc, ni, tid, 1) == 0) {
+			if (mt7921_mcu_sta_ba(sc, ni, tid, 1, 0) == 0) {
 				ieee80211_addba_req_accept(ic, ni, tid);
 				smtw_addba_ok++;
 			} else {
@@ -1430,8 +1447,61 @@ mwx_ba_task(void *arg)
 				smtw_addba_fail++;
 			}
 		}
+		/* TX (originator): the AP accepted our ADDBA request. */
+		if (sc->sc_txba_stop & bit) {
+			sc->sc_txba_stop &= ~bit;
+			if (ic->ic_state == IEEE80211_S_RUN)
+				mt7921_mcu_sta_ba(sc, ni, tid, 0, 1);
+		}
+		if (sc->sc_txba_start & bit) {
+			sc->sc_txba_start &= ~bit;
+			if (ic->ic_state != IEEE80211_S_RUN)
+				continue;
+			if (mt7921_mcu_sta_ba(sc, ni, tid, 1, 1) == 0) {
+				ieee80211_addba_resp_accept(ic, ni, tid);
+				smtw_txba_ok++;
+			} else {
+				ieee80211_addba_resp_refuse(ic, ni, tid,
+				    IEEE80211_STATUS_UNSPECIFIED);
+				smtw_txba_fail++;
+			}
+		}
 	}
 	splx(s);
+}
+
+/*
+ * TX Block Ack: net80211 sent the ADDBA request and got a positive
+ * response; program the firmware as originator (Linux
+ * mt7921_mcu_uni_tx_ba()). The hardware then aggregates QoS data for
+ * this TID and handles BlockAck/BAR itself.
+ */
+int
+mwx_ampdu_tx_start(struct ieee80211com *ic, struct ieee80211_node *ni,
+    uint8_t tid)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
+
+	smtw_txba_req++;
+	if (!smtw_tune.txba || ni != ic->ic_bss || tid >= 8)
+		return ENOTSUP;
+	sc->sc_txba_stop &= ~(1U << tid);
+	sc->sc_txba_start |= 1U << tid;
+	task_add(sc->sc_nswq, &sc->sc_ba_task);
+	return EBUSY;
+}
+
+void
+mwx_ampdu_tx_stop(struct ieee80211com *ic, struct ieee80211_node *ni,
+    uint8_t tid)
+{
+	struct mwx_softc *sc = (struct mwx_softc *)ic->ic_softc;
+
+	if (ni != ic->ic_bss || tid >= 8 || ic->ic_state != IEEE80211_S_RUN)
+		return;
+	sc->sc_txba_start &= ~(1U << tid);
+	sc->sc_txba_stop |= 1U << tid;
+	task_add(sc->sc_nswq, &sc->sc_ba_task);
 }
 
 /*
@@ -1586,6 +1656,7 @@ mwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 	if (ic->ic_state == IEEE80211_S_RUN) {
 		/* cancel other tasks here */
 		sc->sc_ba_start = sc->sc_ba_stop = 0;
+		sc->sc_txba_start = sc->sc_txba_stop = 0;
 	}
 
 	/* Runtime tunable: HT is advertised from the next association on. */
@@ -1607,6 +1678,11 @@ mwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 		else
 			ic->ic_flags &= ~IEEE80211_F_VHTON;
 		ic->ic_flags &= ~IEEE80211_F_HEON;
+		/* net80211 asks for TX Block Ack only with this capability. */
+		if (smtw_tune.ht && smtw_tune.txba)
+			ic->ic_caps |= IEEE80211_C_TX_AMPDU;
+		else
+			ic->ic_caps &= ~IEEE80211_C_TX_AMPDU;
 		sc->sc_chw_valid = 0;
 	}
 
@@ -2515,6 +2591,8 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	ic->ic_delete_key = mwx_delete_key;
 	ic->ic_ampdu_rx_start = mwx_ampdu_rx_start;
 	ic->ic_ampdu_rx_stop = mwx_ampdu_rx_stop;
+	ic->ic_ampdu_tx_start = mwx_ampdu_tx_start;
+	ic->ic_ampdu_tx_stop = mwx_ampdu_tx_stop;
 
 	/* Override 802.11 state transition machine. */
 	sc->sc_newstate = ic->ic_newstate;

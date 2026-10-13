@@ -3203,6 +3203,9 @@ ieee80211_recv_addba_resp(struct ieee80211com *ic, mbuf_t m,
     }
     /* we got an ADDBA Response matching our request, stop timeout */
     timeout_del(&ba->ba_to);
+    /* The recipient may grant a smaller window than requested. */
+    if (bufsz > 0 && bufsz < ba->ba_winsize)
+        ba->ba_winsize = bufsz;
     
     if (status != IEEE80211_STATUS_SUCCESS) {
         if (ni->ni_addba_req_intval[tid] <

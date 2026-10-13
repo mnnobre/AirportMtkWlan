@@ -34,6 +34,8 @@ struct smtw_tune_t {
 	int ba;		/* accept RX Block Ack agreements (A-MPDU RX) */
 	int vht;	/* advertise 802.11ac (VHT), needs bw=80 */
 	int bw;		/* max channel width to advertise: 20, 40 or 80 MHz */
+	int txba;	/* request TX Block Ack (A-MPDU TX) */
+	int sndq;	/* if_snd length in packets (applies immediately) */
 };
 extern struct smtw_tune_t smtw_tune;
 struct ieee80211com;
