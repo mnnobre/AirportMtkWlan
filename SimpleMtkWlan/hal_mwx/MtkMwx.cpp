@@ -1055,7 +1055,7 @@ smtw_rxrate_account(uint32_t v0)
  */
 static uint32_t smtw_tx_stall, smtw_tx_resume, smtw_tx_drop;
 
-struct smtw_tune_t smtw_tune = { 1, 1, 0, 20 };
+struct smtw_tune_t smtw_tune = { 1, 1, 1, 80 };
 
 
 static inline int	mwx_dma_free_slots(struct mwx_queue *);
