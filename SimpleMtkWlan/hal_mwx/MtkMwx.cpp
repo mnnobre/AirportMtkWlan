@@ -1050,7 +1050,7 @@ smtw_rxrate_account(uint32_t v0)
  */
 static uint32_t smtw_tx_stall, smtw_tx_resume, smtw_tx_drop;
 
-struct smtw_tune_t smtw_tune = { 1, 0 };
+struct smtw_tune_t smtw_tune = { 1, 1 };
 
 
 static inline int	mwx_dma_free_slots(struct mwx_queue *);
@@ -1348,8 +1348,9 @@ mwx_node_alloc(struct ieee80211com *ic)
  * firmware has to know the agreement (STA_REC_BA, recipient) to answer
  * with BlockAcks, as mt7921_mcu_uni_rx_ba() does in Linux. The MCU
  * command waits for a response, so it runs in mwx_ba_task(), which then
- * accepts or refuses the agreement (EBUSY here). Off unless the "ba"
- * tunable is set; refused requests make the AP send single MPDUs.
+ * accepts or refuses the agreement (EBUSY here). With the "ba" tunable
+ * off, requests are refused and the AP falls back to single MPDUs; on
+ * the tested AP that meant 6 Mbit/s OFDM for all data frames.
  */
 int
 mt7921_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni,
