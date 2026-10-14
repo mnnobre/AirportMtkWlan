@@ -49,8 +49,9 @@ Not tested or not working yet:
 - encryption is still done in software (works at the speeds above)
 - macOS asks for background scans every few seconds while connected, which causes
   occasional latency spikes
-- **Bluetooth is a separate device** on the same card (USB `0e8d:0608`); this repository
-  does not handle it. See [laobamac/SimpleMtkBtFw](https://github.com/laobamac/SimpleMtkBtFw).
+- **Bluetooth is a separate device** on the same card (USB `0e8d:0608`) and is not handled
+  by this kext. It works with [mnnobre/SimpleMtkBtFw](https://github.com/mnnobre/SimpleMtkBtFw)
+  (tested on the same machine: pairing, headset audio and microphone).
 
 ## Install (OpenCore)
 
