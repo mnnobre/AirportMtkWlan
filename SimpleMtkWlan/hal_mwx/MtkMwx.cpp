@@ -884,7 +884,19 @@ mwx_init(struct ifnet *ifp)
 	else
 		MWX_DEV_LOG(sc, "init deep sleep disabled\n");
 
-	rv = mt7921_mcu_set_mac_enable(sc, 0, 1);
+	/*
+	 * Right after mwx_stop() (e.g. the native layer restarting the HAL to
+	 * apply a private address) the reply to MAC_INIT_CTRL can time out
+	 * (EWOULDBLOCK); the firmware is still settling. Retry briefly.
+	 */
+	for (int try_ = 0; ; try_++) {
+		rv = mt7921_mcu_set_mac_enable(sc, 0, 1);
+		if (rv != EWOULDBLOCK || try_ >= 3)
+			break;
+		MWX_DEV_LOG(sc, "init mac enable timed out, retry %d\n",
+		    try_ + 1);
+		delay(100 * 1000);
+	}
 	if (rv) {
 		MWX_DEV_LOG(sc, "init mac enable failed error=%d\n", rv);
 		return rv;
@@ -4033,10 +4045,24 @@ mwx_mcu_rx_event(struct mwx_softc *sc, struct mbuf *m)
 	case MCU_EVENT_SCAN_DONE:
 		mt7921_mcu_scan_event(sc, m);
 		break;
-#if 0
-	case MCU_EVENT_BSS_BEACON_LOSS:
-		mt7921_mcu_connection_loss_event(dev, skb);
+	case MCU_EVENT_BSS_BEACON_LOSS: {
+		/*
+		 * Firmware stopped hearing the AP (Linux: connection loss). As
+		 * iwm_rx_bmiss(): send a directed probe request first; if the
+		 * AP does not answer, the management timer drops net80211 back
+		 * to scanning, and the native layer reports the disconnect.
+		 */
+		struct ieee80211com *ic = &sc->sc_ic;
+
+		MWX_DEV_LOG(sc, "beacon loss state=%d mgt_timer=%d\n",
+		    ic->ic_state, ic->ic_mgt_timer);
+		if (ic->ic_opmode == IEEE80211_M_STA &&
+		    ic->ic_state == IEEE80211_S_RUN && ic->ic_mgt_timer == 0)
+			IEEE80211_SEND_MGMT(ic, ic->ic_bss,
+			    IEEE80211_FC0_SUBTYPE_PROBE_REQ, 0);
 		break;
+	}
+#if 0
 	case MCU_EVENT_BSS_ABSENCE:
 		mt7921_mcu_bss_event(dev, skb);
 		break;
@@ -4090,8 +4116,16 @@ mwx_mcu_rx_event(struct mwx_softc *sc, struct mbuf *m)
 		printf("%s: MAGIC COMMAND\n", DEVNAME(sc));
 	default:
 		if (rxd_seq == 0 || rxd_seq >= nitems(sc->sc_mcu_wait)) {
-			printf("%s: mcu rx bad seq %x\n", DEVNAME(sc),
-			    rxd_seq);
+			/*
+			 * seq 0 is an unsolicited event (Linux routes !seq to
+			 * mt7921_mcu_rx_unsolicited_event); not a command reply.
+			 */
+			static uint32_t unsolicited_log_count;
+
+			if (unsolicited_log_count++ < 32)
+				MWX_DEV_LOG(sc, "mcu unsolicited event eid=0x%02x "
+				    "ext=0x%02x seq=%u len=%d\n", rxd_eid,
+				    rxd_ext_eid, rxd_seq, len);
 			break;
 		}
 
