@@ -39,6 +39,9 @@ struct smtw_tune_t {
 	int txs;	/* TX status report every N frames, 0 = none (immediate) */
 };
 extern struct smtw_tune_t smtw_tune;
+
+/* ni_rssi = dBm - MWX_MIN_DBM, see mwx_dbm_to_rssi() (IWM_MIN_DBM in itlwm). */
+#define MWX_MIN_DBM	(-100)
 struct ieee80211com;
 void smtw_request_reassoc(struct ieee80211com *);
 
@@ -51,6 +54,13 @@ public:
     IOReturn enable(IONetworkInterface *interface) override;
     IOReturn disable(IONetworkInterface *interface) override;
     struct ieee80211com *get80211Controller() override;
+#ifdef AIRPORT_WCL
+    /* As ItlIwm: remembered for scan timing requested by airportd. */
+    IOReturn setScanHomeAwayTime(uint32_t milliseconds) override {
+        get80211Controller()->ic_wcl_scan_away_time_ms = milliseconds;
+        return kIOReturnSuccess;
+    }
+#endif
     MtkDriverInfo *getDriverInfo() override;
     MtkDriverController *getDriverController() override;
     void free() override;
