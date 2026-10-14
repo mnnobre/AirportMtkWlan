@@ -437,6 +437,7 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
         explicit_bzero(&join, sizeof(join));
         joinDeferred = joinPending = true;
         joinTimer->setTimeoutMS(30000);
+        XYLog("WCL join deferred until driver ready (MAC address reconfiguration)\n");
         return kIOReturnSuccess;
     }
     if (!supported || !(ic->ic_if.if_flags & IFF_RUNNING) || joinPending || scanPending) {
@@ -540,6 +541,7 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
 
 void AirportItlwmSkywalkInterface::resumeWCLJoin()
 {
+    XYLog("WCL resume deferred join: deferred=%d stopping=%d\n", joinDeferred, wclStopping);
     if (!joinDeferred || wclStopping)
         return;
     AirportWCL::JoinRequest join = deferredJoin;

@@ -408,6 +408,7 @@ struct mwx_softc {
 	uint8_t			sc_txba_start;	/* TX BA TIDs to enable */
 	uint8_t			sc_txba_stop;	/* TX BA TIDs to disable */
 	uint8_t			sc_chw_valid;	/* ic_bss ni_chw negotiated */
+	uint8_t			sc_wcl_ready_pending; /* DRIVER_READY on SCAN */
 	CTimeout		*sc_reset_to;
 	u_int			sc_flags;
 #define MWX_FLAG_SCANNING		0x01
@@ -861,6 +862,12 @@ mwx_init(struct ifnet *ifp)
 
 	MWX_DEV_LOG(sc, "init start opmode=%d flags=0x%x ic_state=%d\n",
 	    ic->ic_opmode, ifp->if_flags, ic->ic_state);
+#ifdef AIRPORT_WCL
+	/* As iwm_init() in the AirportItlwm fork. */
+	sc->sc_wcl_ready_pending = 0;
+	if (ic->ic_event_handler)
+		ic->ic_event_handler(ic, IEEE80211_EVT_DRIVER_RESET_BEGIN, NULL);
+#endif
 	rv = mwx_mcu_set_deep_sleep(sc, 0);
 	if (rv)
 		MWX_DEV_LOG(sc, "init disable deep sleep returned %d\n", rv);
@@ -957,6 +964,16 @@ mwx_init(struct ifnet *ifp)
 	ieee80211_begin_scan(ifp);
 	MWX_DEV_LOG(sc, "init begin scan returned state=%d flags=0x%x sc_flags=0x%x\n",
 	    ic->ic_state, ifp->if_flags, sc->sc_flags);
+#ifdef AIRPORT_WCL
+	/*
+	 * iwm_init() sleeps until the SCAN transition and then reports
+	 * IEEE80211_EVT_DRIVER_READY. Report it from mwx_newstate_task()
+	 * once SCAN is reached instead. WCL waits for this after applying a
+	 * private MAC address before it starts the deferred join; without it
+	 * every join timed out (WCL_JOIN_ABORT 1009/1007).
+	 */
+	sc->sc_wcl_ready_pending = 1;
+#endif
 
 	/*
 	 * ieee80211_begin_scan() ends up scheduling mwx_newstate_task().
@@ -1969,6 +1986,14 @@ mwx_newstate_task(void *ptr)
 		mwx_reset(sc);
 	else
 		sc->sc_newstate(ic, nstate, arg);
+#ifdef AIRPORT_WCL
+	if (!rv && nstate == IEEE80211_S_SCAN && sc->sc_wcl_ready_pending) {
+		sc->sc_wcl_ready_pending = 0;
+		MWX_DEV_LOG(sc, "driver ready (WCL)\n");
+		if (ic->ic_event_handler)
+			ic->ic_event_handler(ic, IEEE80211_EVT_DRIVER_READY, NULL);
+	}
+#endif
 	splx(s);
 }
 
