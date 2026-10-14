@@ -523,6 +523,9 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
     bzero(wclBeaconInfo, sizeof(wclBeaconInfo));
     disassocIsVoluntary = false;
     joinTimer->setTimeoutMS(30000);
+    XYLog("WCL join start: state=%d flags=0x%08x esslen=%d personal=%d enterprise=%d bssid=%s\n",
+          ic->ic_state, ic->ic_flags, ic->ic_des_esslen, personal, enterprise,
+          ether_sprintf(joinBSSID));
     if (ic->ic_state != IEEE80211_S_SCAN && ic->ic_newstate(ic, IEEE80211_S_SCAN, -1)) {
         joinPending = false;
         joinTimer->cancelTimeout();

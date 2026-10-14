@@ -71,3 +71,50 @@ void smtw_log_publish(IOService *target)
         str->release();
     }
 }
+
+/*
+ * Live publishing: a timer on the driver workloop republishes the log
+ * every second, independent of the interface being enabled (the
+ * AirportItlwm watchdog only runs then).
+ */
+#include <IOKit/IOTimerEventSource.h>
+#include <IOKit/IOWorkLoop.h>
+
+static IOTimerEventSource *gSmtwPubTimer;
+static IOService *gSmtwPubTarget;
+static IOWorkLoop *gSmtwPubWorkLoop;
+
+static void smtw_log_pub_action(OSObject *, IOTimerEventSource *sender)
+{
+    smtw_log_publish(gSmtwPubTarget);
+    sender->setTimeoutMS(1000);
+}
+
+void smtw_log_start_publisher(OSObject *owner, IOWorkLoop *wl, IOService *target)
+{
+    if (gSmtwPubTimer || owner == NULL || wl == NULL || target == NULL)
+        return;
+    gSmtwPubTimer = IOTimerEventSource::timerEventSource(owner, smtw_log_pub_action);
+    if (gSmtwPubTimer == NULL)
+        return;
+    if (wl->addEventSource(gSmtwPubTimer) != kIOReturnSuccess) {
+        OSSafeReleaseNULL(gSmtwPubTimer);
+        return;
+    }
+    target->retain();
+    gSmtwPubTarget = target;
+    gSmtwPubWorkLoop = wl;
+    gSmtwPubTimer->setTimeoutMS(1000);
+}
+
+void smtw_log_stop_publisher(void)
+{
+    if (gSmtwPubTimer == NULL)
+        return;
+    gSmtwPubTimer->cancelTimeout();
+    gSmtwPubWorkLoop->removeEventSource(gSmtwPubTimer);
+    OSSafeReleaseNULL(gSmtwPubTimer);
+    smtw_log_publish(gSmtwPubTarget);
+    OSSafeReleaseNULL(gSmtwPubTarget);
+    gSmtwPubWorkLoop = NULL;
+}

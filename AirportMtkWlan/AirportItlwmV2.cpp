@@ -22,8 +22,14 @@ OSDefineMetaClassAndStructors(CTimeout, OSObject)
 IO80211WorkQueue *_fWorkloop;
 IOCommandGate *_fCommandGate;
 
+/* MtkLog.cpp: driver log buffer published on the PCI device. */
+void smtw_log_publish(IOService *target);
+void smtw_log_start_publisher(OSObject *owner, IOWorkLoop *wl, IOService *target);
+void smtw_log_stop_publisher(void);
+
 void AirportItlwm::releaseAll()
 {
+    smtw_log_stop_publisher();
 #ifdef AIRPORT_WCL
     if (fNetIf)
         static_cast<AirportItlwmSkywalkInterface *>(fNetIf)->stopWCL();
@@ -113,7 +119,6 @@ eventHandler(struct ieee80211com *ic, int msgCode, void *data)
 #endif
 }
 
-void smtw_log_publish(IOService *target);
 
 void AirportItlwm::watchdogAction(IOTimerEventSource *timer)
 {
@@ -276,6 +281,8 @@ bool AirportItlwm::start(IOService *provider)
     bool ok = startImpl(provider);
     XYLog("AirportMtkWlan start %s\n", ok ? "succeeded" : "FAILED");
     smtw_log_publish(provider ? provider->getProvider() : NULL);
+    if (ok)
+        smtw_log_start_publisher(this, getWorkLoop(), provider->getProvider());
     return ok;
 }
 

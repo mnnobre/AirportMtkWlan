@@ -1352,6 +1352,16 @@ ieee80211_node_choose_bss(struct ieee80211com *ic, int bgscan,
             *curbs = ni;
         
         int fail = ieee80211_match_bss(ic, ni, bgscan);
+#ifdef AIRPORT_WCL
+        /* Diagnostic: why a candidate of the requested network is refused. */
+        if (fail != 0 && ic->ic_wcl_join_requested &&
+            (IEEE80211_ADDR_EQ(ni->ni_bssid, ic->ic_des_bssid) ||
+             (ni->ni_esslen == ic->ic_des_esslen &&
+              memcmp(ni->ni_essid, ic->ic_des_essid, ni->ni_esslen) == 0)))
+            XYLog("%s refused %s chan=%d rssi=%d fail=0x%x rsnprotos=0x%x akms=0x%x ciphers=0x%x\n",
+                  __FUNCTION__, ether_sprintf(ni->ni_bssid), ieee80211_chan2ieee(ic, ni->ni_chan),
+                  ni->ni_rssi, fail, ni->ni_rsnprotos, ni->ni_rsnakms, ni->ni_rsnciphers);
+#endif
         if (fail != 0) {
             DPRINTF(("%s ieee80211_match_bss==FALSE, ssid=%s, bssid=%s, %d\n", __FUNCTION__, ni->ni_essid, ether_sprintf(ni->ni_bssid), fail));
             continue;
@@ -1491,6 +1501,11 @@ ieee80211_end_scan(struct _ifnet *ifp)
         ieee80211_switch_ess(ic);
     
     selbs = ieee80211_node_choose_bss(ic, bgscan, &curbs);
+#ifdef AIRPORT_WCL
+    if (ic->ic_wcl_join_requested)
+        XYLog("%s join requested: selected %s state=%d bgscan=%d\n", __FUNCTION__,
+              selbs ? ether_sprintf(selbs->ni_bssid) : "none", ic->ic_state, bgscan);
+#endif
     if (bgscan) {
         struct ieee80211_node_switch_bss_arg *arg;
         
