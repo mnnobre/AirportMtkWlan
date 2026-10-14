@@ -1491,6 +1491,26 @@ struct wtbl_vht {
 	uint8_t		rsv[4];
 } __packed;
 
+/* As struct wtbl_ba in Linux mt76_connac_mcu.h. */
+#define	WTBL_BA				0x08
+struct wtbl_ba {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		tid;
+	uint8_t		ba_type;
+	uint8_t		rsv0[2];
+	uint16_t	sn;		/* originator only */
+	uint8_t		ba_en;
+	uint8_t		ba_winsize_idx;
+	uint16_t	ba_winsize;
+	uint8_t		peer_addr[6];	/* recipient only */
+	uint8_t		rst_ba_tid;
+	uint8_t		rst_ba_sel;
+	uint8_t		rst_ba_sb;
+	uint8_t		band_idx;
+	uint8_t		rsv1[4];
+} __packed;
+
 #define	WTBL_HDR_TRANS			0x06
 struct wtbl_hdr_trans {
 	uint16_t	tag;

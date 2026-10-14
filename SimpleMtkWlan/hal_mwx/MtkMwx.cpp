@@ -1464,6 +1464,65 @@ mt7921_mcu_sta_ba(struct mwx_softc *sc, struct ieee80211_node *ni,
 		ssn = ni->ni_rx_ba[tid].ba_winstart;
 		winsize = ni->ni_rx_ba[tid].ba_winsize;
 	}
+
+	/*
+	 * Linux (mt76_connac_mcu_sta_ba) first sets the agreement in the
+	 * hardware WTBL (WTBL_BA), then sends STA_REC_BA. Without the WTBL
+	 * entry the hardware never aggregated (TXS: no A-MPDU). Only done
+	 * for TX here; RX Block Ack already works with STA_REC_BA alone.
+	 */
+	if (tx) {
+		struct sta_rec_wtbl *wtbl;
+		struct wtbl_ba *wba;
+		uint16_t wnum = 0, wtlv = 0;
+		struct mbuf *wm;
+
+		wm = mwx_alloc_sta_req_tlv(sizeof(struct sta_req_hdr));
+		if (wm == NULL) {
+			m_freem(m);
+			return ENOBUFS;
+		}
+		wtbl = (struct sta_rec_wtbl *)mwx_append_tlv(wm, &wtlv,
+		    STA_REC_WTBL, sizeof(*wtbl));
+		wtbl->wlan_idx_lo = mw->wcid & 0xff;
+		wtbl->wlan_idx_hi = mw->wcid >> 8;
+		wtbl->operation = WTBL_SET;
+		wba = (struct wtbl_ba *)mwx_append_tlv(wm, &wnum, WTBL_BA,
+		    sizeof(*wba));
+		wba->tid = tid;
+		wba->ba_type = MT_BA_TYPE_ORIGINATOR;
+		wba->rsv0[0] = wba->rsv0[1] = 0;
+		wba->sn = enable ? htole16(ssn) : 0;
+		wba->ba_en = enable;
+		wba->ba_winsize_idx = 0;
+		wba->ba_winsize = enable ? htole16(winsize) : 0;
+		memset(wba->peer_addr, 0, sizeof(wba->peer_addr));
+		wba->rst_ba_tid = wba->rst_ba_sel = wba->rst_ba_sb = 0;
+		wba->band_idx = 0;
+		memset(wba->rsv1, 0, sizeof(wba->rsv1));
+		wtbl->tlv_num = htole16(wnum);
+		wtbl->len = htole16(le16toh(wtbl->len) + sizeof(*wba));
+		wm = mwx_fill_sta_req_hdr(wm, mvif, mvif->omac_idx, mw->wcid,
+		    wtlv);
+		if (wm == NULL) {
+			m_freem(m);
+			return ENOBUFS;
+		}
+		rv = mwx_mcu_send_mbuf(sc, MCU_UNI_CMD_STA_REC_UPDATE, wm, &seq);
+		if (rv == 0)
+			rv = mwx_mcu_wait_resp_int(sc,
+			    MCU_UNI_CMD_STA_REC_UPDATE, seq, &status);
+		MWX_DEV_LOG(sc, "tx ba wtbl tid=%u enable=%d ssn=%u win=%u "
+		    "transport=%d firmware=%u\n", tid, enable, ssn, winsize,
+		    rv, status);
+		if (rv == 0 && status != 0)
+			rv = EIO;
+		if (rv) {
+			m_freem(m);
+			return rv;
+		}
+		status = 0;
+	}
 	rba->tid = tid;
 	rba->ba_type = tx ? MT_BA_TYPE_ORIGINATOR : MT_BA_TYPE_RECIPIENT;
 	rba->amsdu = 0;
@@ -2600,6 +2659,13 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 #endif
 	    IEEE80211_C_SHSLOT |	/* short slot time supported */
 	    IEEE80211_C_SHPREAMBLE;	/* short preamble supported */
+	/*
+	 * The firmware hardware scan covers both bands in one pass. This
+	 * also makes ieee80211_node_choose_bss() prefer a 5 GHz AP of the
+	 * same ESS over a stronger 2.4 GHz one (above the 5 GHz RSSI
+	 * threshold) instead of picking only by RSSI.
+	 */
+	ic->ic_caps |= IEEE80211_C_SCANALLBAND;
 
 	/*
 	 * HT at 20 MHz only for now: the channel and BSS RLM programming
