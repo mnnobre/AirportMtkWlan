@@ -1099,7 +1099,7 @@ static uint32_t smtw_tx_stall, smtw_tx_resume, smtw_tx_drop;
 /* net80211 (ieee80211.c), not exported in a header. */
 void	ieee80211_configure_ampdu_tx(struct ieee80211com *, int);
 
-struct smtw_tune_t smtw_tune = { 1, 1, 1, 80, 0, 2048, 1 };
+struct smtw_tune_t smtw_tune = { 1, 1, 1, 80, 0, 2048, 16 };
 
 
 static inline int	mwx_dma_free_slots(struct mwx_queue *);
@@ -6393,7 +6393,8 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
 	subtype >>= IEEE80211_FC0_SUBTYPE_SHIFT;
 	multicast = IEEE80211_IS_MULTICAST(wh->i_addr1);
 
-	if (type == IEEE80211_FC0_TYPE_CTL)
+	/* type is shifted here; compare with shifted constants. */
+	if (type == IEEE80211_FC0_TYPE_CTL >> IEEE80211_FC0_TYPE_SHIFT)
 		hdrlen = sizeof(struct ieee80211_frame_min);
 	else
 		hdrlen = ieee80211_get_hdrlen(wh);
@@ -6437,7 +6438,13 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
 	}
 #endif
 
-	if (multicast || type != IEEE80211_FC0_TYPE_DATA) {
+	/*
+	 * Fixed lowest rate and no aggregation for management, control and
+	 * multicast only (Linux: !ieee80211_is_data() || multicast). This
+	 * compared the shifted type with the unshifted IEEE80211_FC0_TYPE_DATA,
+	 * so every data frame went out at OFDM 6 Mbit/s with BA disabled.
+	 */
+	if (multicast || type != IEEE80211_FC0_TYPE_DATA >> IEEE80211_FC0_TYPE_SHIFT) {
 		/* Fixed rata is available just for 802.11 txd */
 		uint32_t rate, val6;
 
