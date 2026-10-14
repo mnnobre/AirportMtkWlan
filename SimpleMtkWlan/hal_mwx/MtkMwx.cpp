@@ -863,6 +863,15 @@ mwx_init(struct ifnet *ifp)
 	MWX_DEV_LOG(sc, "init start opmode=%d flags=0x%x ic_state=%d\n",
 	    ic->ic_opmode, ifp->if_flags, ic->ic_state);
 	/*
+	 * mwx_stop() leaves the firmware in deep sleep. Take driver own
+	 * (LPCTL) first so it processes commands again; without it the MCU
+	 * commands of the next init got no reply until some later retry
+	 * (seen on every private-address HAL restart of the native layer).
+	 */
+	rv = mwx_mcu_drv_pmctrl(sc);
+	if (rv)
+		MWX_DEV_LOG(sc, "init driver own failed error=%d\n", rv);
+	/*
 	 * Update MAC in case the upper layers changed it (as iwm_preinit()),
 	 * before it is programmed into the firmware by uni_add_dev below.
 	 */
@@ -1059,8 +1068,12 @@ mwx_stop(struct ifnet *ifp)
 
 		mn = &sc->sc_vif.vif_mn;
 		mt7921_mcu_uni_add_dev(sc, &sc->sc_vif, mn, 0);
-		mwx_mcu_set_deep_sleep(sc, 1);
+		/*
+		 * MAC off before deep sleep: with deep sleep enabled first the
+		 * MAC_INIT_CTRL reply never arrived (command timeout).
+		 */
 		mt7921_mcu_set_mac_enable(sc, 0, 0);
+		mwx_mcu_set_deep_sleep(sc, 1);
 	}
 
 	sc->sc_newstate(ic, IEEE80211_S_INIT, -1);
