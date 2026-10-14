@@ -862,6 +862,16 @@ mwx_init(struct ifnet *ifp)
 
 	MWX_DEV_LOG(sc, "init start opmode=%d flags=0x%x ic_state=%d\n",
 	    ic->ic_opmode, ifp->if_flags, ic->ic_state);
+	/*
+	 * Update MAC in case the upper layers changed it (as iwm_preinit()),
+	 * before it is programmed into the firmware by uni_add_dev below.
+	 */
+	if (!IEEE80211_ADDR_EQ(etheranyaddr, ic->ic_ac.ac_enaddr) &&
+	    !IEEE80211_ADDR_EQ(ic->ic_myaddr, ic->ic_ac.ac_enaddr)) {
+		IEEE80211_ADDR_COPY(ic->ic_myaddr, ic->ic_ac.ac_enaddr);
+		MWX_DEV_LOG(sc, "init mac address now %s\n",
+		    ether_sprintf(ic->ic_myaddr));
+	}
 #ifdef AIRPORT_WCL
 	/* As iwm_init() in the AirportItlwm fork. */
 	sc->sc_wcl_ready_pending = 0;
@@ -5834,7 +5844,12 @@ mt7921_mcu_uni_add_dev(struct mwx_softc *sc, struct mwx_vif *mvif,
 	idx = mvif->omac_idx > EXT_BSSID_START ? HW_BSSID_0 : mvif->omac_idx;
 	basic_req.basic.hw_bss_idx = idx;
 
-	memcpy(dev_req.tlv.omac_addr, sc->sc_lladdr, ETHER_ADDR_LEN);
+	/*
+	 * The current address, not the factory one: the upper layers may have
+	 * changed it (native Wi-Fi applies a private address per network), and
+	 * the hardware only accepts unicast frames for this own-MAC address.
+	 */
+	memcpy(dev_req.tlv.omac_addr, sc->sc_ic.ic_myaddr, ETHER_ADDR_LEN);
 
 	if (enable) {
 		cmd = MCU_UNI_CMD_DEV_INFO_UPDATE;
