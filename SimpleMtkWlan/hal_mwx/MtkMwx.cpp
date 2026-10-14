@@ -1099,7 +1099,7 @@ static uint32_t smtw_tx_stall, smtw_tx_resume, smtw_tx_drop;
 /* net80211 (ieee80211.c), not exported in a header. */
 void	ieee80211_configure_ampdu_tx(struct ieee80211com *, int);
 
-struct smtw_tune_t smtw_tune = { 1, 1, 1, 80, 0, 2048, 16 };
+struct smtw_tune_t smtw_tune = { 1, 1, 1, 80, 1, 2048, 16 };
 
 
 static inline int	mwx_dma_free_slots(struct mwx_queue *);
@@ -6525,6 +6525,23 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
 
 }
 
+/*
+ * mac80211 queue (0 VO, 1 VI, 2 BE, 3 BK) for a frame, as Linux picks it:
+ * data by TID (ieee802_1d_to_ac[]), non-QoS data BE, everything else VO.
+ * All frames used to go to VO, where the firmware does not aggregate.
+ */
+static uint8_t
+mwx_tx_queue_mapping(struct ieee80211_frame *wh)
+{
+	static const uint8_t tid2ac[8] = { 2, 3, 3, 2, 1, 1, 0, 0 };
+
+	if ((wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) != IEEE80211_FC0_TYPE_DATA)
+		return 0;
+	if (!ieee80211_has_qos(wh))
+		return 2;
+	return tid2ac[ieee80211_get_qos(wh) & 7];
+}
+
 static inline uint8_t
 mt7921_lmac_mapping(uint8_t ac)
 {
@@ -6563,7 +6580,7 @@ mt7921_mac_write_txwi(struct mwx_softc *sc, struct mbuf *m,
 	} else {
 		p_fmt = MT_TX_TYPE_CT;
 		q_idx = wmm_idx * MWX_MAX_WMM_SETS +
-		    mt7921_lmac_mapping(/* skb_get_queue_mapping(skb) */ 0);
+		    mt7921_lmac_mapping(mwx_tx_queue_mapping(wh));
 
 #ifdef NOTYET
 		/* counting non-offloading skbs */
@@ -7628,6 +7645,18 @@ int mt7921_mcu_set_associated_peer(struct mwx_softc *sc)
     mt7921_mcu_add_basic_tlv(m, &tlvnum, sc, ni, 1, 0);
     struct sta_rec_state *state = (struct sta_rec_state *)mwx_append_tlv(m, &tlvnum, STA_REC_STATE, sizeof(*state));
     state->state = 2; /* MT76_STA_INFO_STATE_ASSOC: NONE=0, AUTH=1, ASSOC=2. */
+    /*
+     * This record arrives after the full one from mt7921_mac_sta_update().
+     * A zero vht_opmode here told the firmware the peer takes 20 MHz and one
+     * spatial stream, so rate control never left BW20/NSS1 (seen in TXS).
+     */
+    if (ni->ni_flags & IEEE80211_NODE_VHT) {
+        int nss = mwx_vht_nss(le16toh(ni->ni_vht_mcsinfo.rx_mcs_map));
+
+        state->vht_opmode = mwx_sta_bw(ni);
+        if (nss > 0)
+            state->vht_opmode |= (nss - 1) << 4;
+    }
     m = mwx_fill_sta_req_hdr(m, &sc->sc_vif, sc->sc_vif.omac_idx, ((struct mwx_node *)ni)->wcid, tlvnum);
     if (!m) return ENOBUFS;
     int seq, rv = mwx_mcu_send_mbuf(sc, MCU_UNI_CMD_STA_REC_UPDATE, m, &seq);
