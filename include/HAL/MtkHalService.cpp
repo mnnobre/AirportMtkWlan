@@ -72,6 +72,32 @@ tsleep_nsec(void *ident, int priority, const char *wmesg, uint64_t timo)
 //    XYLog("%s %s\n", __FUNCTION__, wmesg);
     struct timespec ts;
     int err;
+
+    /*
+     * Called inside the workloop gate (e.g. the native layer restarting
+     * the HAL to apply a private address), msleep() would keep the gate
+     * and the interrupt event source that delivers the MCU reply could not
+     * run, so every command timed out. Sleep on the command gate instead,
+     * which releases it while waiting (the AirportItlwm HALs do the same).
+     * wakeupOn()'s wakeup() wakes either kind of sleeper on the same ident.
+     */
+    if (this->mainWorkLoop && this->mainCommandGate &&
+        this->mainWorkLoop->inGate()) {
+        IOReturn r;
+        if (timo) {
+            AbsoluteTime deadline;
+            clock_interval_to_deadline(timo, kNanosecondScale, &deadline);
+            r = this->mainCommandGate->commandSleep(ident, deadline,
+                THREAD_INTERRUPTIBLE);
+        } else {
+            r = this->mainCommandGate->commandSleep(ident,
+                THREAD_INTERRUPTIBLE);
+        }
+        if (r == THREAD_AWAKENED)
+            return 0;
+        return r == THREAD_TIMED_OUT ? EWOULDBLOCK : EINTR;
+    }
+
     memset(&ts, 0, sizeof(struct timespec));
     ts.tv_sec = timo / 1000000000ULL;
     ts.tv_nsec = timo % 1000000000ULL;
