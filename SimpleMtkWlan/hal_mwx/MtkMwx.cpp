@@ -992,6 +992,19 @@ mwx_stop(struct ifnet *ifp)
 
 	ifp->if_timer = 0;
 	ifp->if_flags &= ~IFF_RUNNING;
+#ifdef AIRPORT_WCL
+	/*
+	 * A firmware scan stopped here never completes, so clear the scan
+	 * state airportd asked for and report the stop (as iwm_stop() in the
+	 * AirportItlwm fork).
+	 */
+	ic->ic_flags &= ~(IEEE80211_F_BGSCAN | IEEE80211_F_ASCAN);
+	ic->ic_wcl_scan_requested = false;
+	ic->ic_wcl_scan_active = false;
+	ic->ic_wcl_scan_ssid_length = 0;
+	if (ic->ic_event_handler)
+		ic->ic_event_handler(ic, IEEE80211_EVT_DRIVER_STOPPED, NULL);
+#endif
 	ifq_clr_oactive(&ifp->if_snd);
 
 	if (was_running) {
@@ -2257,9 +2270,24 @@ mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	}
 
 	rv = mwx_dma_txwi_enqueue(sc, &sc->sc_txq, mt);
-	if (rv != 0)
+	if (rv != 0) {
 		mwx_txwi_put(sc, mt);
-	return rv;
+		return rv;
+	}
+#ifdef AIRPORT_WCL
+	{
+		/* Per-AC TX count for airportd link statistics. */
+		struct ieee80211_frame *dwh = mtod(m, struct ieee80211_frame *);
+		uint8_t fc0 = dwh->i_fc[0];
+
+		if ((fc0 & IEEE80211_FC0_TYPE_MASK) == IEEE80211_FC0_TYPE_DATA &&
+		    !(fc0 & IEEE80211_FC0_SUBTYPE_NODATA))
+			++sc->sc_ic.ic_wcl_tx_packets[ieee80211_has_qos(dwh) ?
+			    ieee80211_wcl_ac(ieee80211_get_qos(dwh) &
+			    IEEE80211_QOS_TID) : EDCA_AC_BE];
+	}
+#endif
+	return 0;
 }
 
 void
