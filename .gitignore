@@ -15,3 +15,7 @@ build/
 *.kext/
 *.zip
 *.tar.gz
+
+# Fetched by build.sh (acidanthera/MacKernelSDK, pinned)
+MacKernelSDK/
+tools/mtkctl

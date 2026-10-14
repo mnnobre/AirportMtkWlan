@@ -137,7 +137,7 @@ else:
         return res
 
 
-    extra = {"PROJECT_DIR": root, "SRCROOT": root, "MODULE_VERSION": tset.get("MODULE_VERSION", pset.get("MODULE_VERSION", "1.0.0")), "GIT_COMMIT": ""}
+    extra = {"PROJECT_DIR": root, "SRCROOT": root, "TARGET_NAME": args.target, "MODULE_VERSION": tset.get("MODULE_VERSION", pset.get("MODULE_VERSION", "1.0.0")), "GIT_COMMIT": ""}
     defines = [expand(d, extra) for d in getl("GCC_PREPROCESSOR_DEFINITIONS")] + args.define
     module = expand(tset.get("MODULE_NAME", tset.get("PRODUCT_BUNDLE_IDENTIFIER")), extra)
     version = extra["MODULE_VERSION"]

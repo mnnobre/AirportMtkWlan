@@ -39,3 +39,17 @@ files.
 The top-level project is distributed under GPLv2. Individual files may include
 more specific GPL, BSD, OpenBSD, NetBSD, FreeBSD, or permissive license notices;
 those notices remain authoritative for the corresponding files.
+
+## AirportMtkWlan (this fork)
+
+- Native macOS Wi-Fi front end (`AirportMtkWlan/`, `include/Airport/`): from the
+  `AirportItlwm-Sequoia` target of [laobamac/itlwm](https://github.com/laobamac/itlwm),
+  itself based on AirportItlwm by zxystd and the OpenIntelWireless contributors
+  ([OpenIntelWireless/itlwm](https://github.com/OpenIntelWireless/itlwm)).
+- `mtk-dev` fixes and PR #5: KyatNguyen and mavizao
+  ([KyatNguyen/SimpleMtkWlan](https://github.com/KyatNguyen/SimpleMtkWlan/tree/mtk-dev)).
+- `tools/ClientKit`: laobamac, [SimpleMTKClient](https://github.com/laobamac/SimpleMTKClient)
+  (BSD 3-Clause).
+- MediaTek protocol details were checked against the Linux mt76 driver (mt7921).
+- Code changes after those, the Command Line Tools build and the documentation were
+  written by Claude Code (Anthropic) and tested on hardware by the repository owner.
